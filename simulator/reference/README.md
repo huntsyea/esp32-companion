@@ -44,3 +44,22 @@ surface. Both frames use the same native Clock Screen source as the device.
 `scripts/tests/test_companion_clock.py` also injects UTC epochs for midnight,
 date rollover, both Chicago daylight-saving transitions, and continued clock
 advancement without transport events.
+
+## Screen navigation trace
+
+The Screen Manager is the only module that changes Avatar and Clock Screen
+visibility. A left swipe selects the Clock Screen. A right swipe returns to the
+Avatar Screen. The interactive simulator also maps these actions to `.` and
+`,` respectively.
+
+Use the deterministic trace to inspect remembered selection, temporary voice
+focus, the 1500 ms idle-return delay, and push-to-talk gesture blocking:
+
+```sh
+./simulator/run.sh --trace-navigation \
+  left,connected,listen,recording_end,tts_start,tts_stop,time=1500
+```
+
+`scripts/tests/test_screen_manager.py` covers both directions, non-wrapping
+screen edges, push-to-talk blocking, cancellation, renewed activity, error
+recovery, and concurrent clock and Avatar animation updates.

@@ -13,7 +13,8 @@ if [[ "${1:-}" == "--smoke-test" || "${1:-}" == "--render-reference" ||
       "${1:-}" == "--render-state" || "${1:-}" == "--trace-events" ||
       "${1:-}" == "--render-clock" || "${1:-}" == "--render-clock-unsynchronized" ||
       "${1:-}" == "--inspect-clock" || "${1:-}" == "--inspect-clock-unsynchronized" ||
-      "${1:-}" == "--trace-clock-updates" || "${1:-}" == "--inspect-clock-zone" ]]; then
+      "${1:-}" == "--trace-clock-updates" || "${1:-}" == "--inspect-clock-zone" ||
+      "${1:-}" == "--trace-navigation" ]]; then
     export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
 fi
 

@@ -35,6 +35,7 @@ add_executable(companion-simulator
     "../main/product_ui/clock_screen.c"
     "../main/product_ui/companion_time.c"
     "../main/product_ui/product_ui.c"
+    "../main/product_ui/screen_manager.c"
 )
 
 target_include_directories(companion-simulator PRIVATE

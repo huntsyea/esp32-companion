@@ -1,6 +1,7 @@
 #include "clock_screen.h"
 #include "companion_time.h"
 #include "product_ui.h"
+#include "screen_manager.h"
 
 #include "lvgl.h"
 
@@ -17,6 +18,7 @@
 
 typedef struct {
     product_ui_t* product_ui;
+    screen_manager_t* screen_manager;
     uint16_t envelope;
 } simulator_controls_t;
 
@@ -27,7 +29,7 @@ static void print_usage(const char* program) {
             "--render-clock EPOCH PATH | --render-clock-unsynchronized PATH | "
             "--inspect-clock EPOCH | --inspect-clock-unsynchronized | "
             "--trace-clock-updates FIRST SAME_MINUTE NEXT_MINUTE | "
-            "--inspect-clock-zone ZONE EPOCH]\n",
+            "--inspect-clock-zone ZONE EPOCH | --trace-navigation ACTIONS]\n",
             program);
 }
 
@@ -268,6 +270,91 @@ static int trace_events(product_ui_t* ui, const char* event_list) {
     return 0;
 }
 
+static void print_navigation_line(const char* action, const char* result,
+                                  screen_manager_t* screen_manager, product_ui_t* product_ui,
+                                  const char* clock_result, const char* animation_result) {
+    printf(
+        "action=%s result=%s selected=%s visible=%s return=%s ptt=%s state=%s clock=%s "
+        "animation=%s\n",
+        action, result,
+        screen_manager_screen_name(screen_manager_get_selected_screen(screen_manager)),
+        screen_manager_screen_name(screen_manager_get_visible_screen(screen_manager)),
+        screen_manager_is_return_pending(screen_manager) ? "pending" : "none",
+        screen_manager_is_push_to_talk_active(screen_manager) ? "on" : "off",
+        product_ui_state_name(product_ui_get_state(product_ui)), clock_result, animation_result);
+}
+
+static int trace_navigation(screen_manager_t* screen_manager, product_ui_t* product_ui,
+                            clock_screen_t* clock_screen, const char* action_list) {
+    char* actions = malloc(strlen(action_list) + 1U);
+    if (actions == NULL) {
+        fputs("Failed to allocate the navigation trace.\n", stderr);
+        return 1;
+    }
+    strcpy(actions, action_list);
+    print_navigation_line("initial", "initial", screen_manager, product_ui, "none", "none");
+
+    char* save_pointer = NULL;
+    for (char* action = strtok_r(actions, ",", &save_pointer); action != NULL;
+         action = strtok_r(NULL, ",", &save_pointer)) {
+        const char* result = "applied";
+        const char* clock_result = "none";
+        const char* animation_result = "none";
+        uint32_t value = 0;
+        if (strcmp(action, "left") == 0 || strcmp(action, "right") == 0) {
+            const screen_manager_swipe_t swipe = strcmp(action, "left") == 0
+                                                     ? SCREEN_MANAGER_SWIPE_LEFT
+                                                     : SCREEN_MANAGER_SWIPE_RIGHT;
+            result = screen_manager_handle_swipe(screen_manager, swipe) ? "changed" : "ignored";
+        } else if (strcmp(action, "ptt=on") == 0 || strcmp(action, "ptt=off") == 0) {
+            screen_manager_set_push_to_talk_active(screen_manager, strcmp(action, "ptt=on") == 0);
+        } else if (strncmp(action, "time=", 5) == 0) {
+            if (!parse_unsigned(action + 5, UINT32_MAX, &value)) {
+                fprintf(stderr, "Invalid navigation time: %s\n", action + 5);
+                free(actions);
+                return 2;
+            }
+            screen_manager_update_time(screen_manager, value);
+        } else if (strncmp(action, "animation=", 10) == 0) {
+            if (!parse_unsigned(action + 10, UINT32_MAX, &value)) {
+                fprintf(stderr, "Invalid animation time: %s\n", action + 10);
+                free(actions);
+                return 2;
+            }
+            product_ui_set_animation_time(product_ui, value);
+            animation_result = "applied";
+        } else if (strncmp(action, "clock=", 6) == 0) {
+            int64_t epoch = 0;
+            if (!parse_epoch(action + 6, &epoch)) {
+                fprintf(stderr, "Invalid clock epoch: %s\n", action + 6);
+                free(actions);
+                return 2;
+            }
+            companion_local_time_t local_time;
+            if (!companion_time_from_epoch(epoch, true, &local_time)) {
+                fputs("Failed to convert the navigation clock epoch.\n", stderr);
+                free(actions);
+                return 1;
+            }
+            clock_result = clock_screen_update(clock_screen, &local_time) ? "changed" : "unchanged";
+        } else {
+            product_ui_event_t event;
+            if (!parse_event(action, &event)) {
+                fprintf(stderr, "Unknown navigation action: %s\n", action);
+                free(actions);
+                return 2;
+            }
+            result = product_ui_dispatch(product_ui, event) ? "changed" : "ignored";
+            screen_manager_set_conversation_state(screen_manager, product_ui_get_state(product_ui));
+        }
+        print_navigation_line(action, result, screen_manager, product_ui, clock_result,
+                              animation_result);
+    }
+
+    free(actions);
+    return 0;
+}
+
 static void apply_key(simulator_controls_t* controls, uint32_t key) {
     switch (key) {
         case 'i':
@@ -275,22 +362,28 @@ static void apply_key(simulator_controls_t* controls, uint32_t key) {
                 product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CONNECTED);
             } else {
                 product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CANCELLED);
+                screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             }
             break;
         case 'l':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_LISTEN_STARTED);
+            if (product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_LISTEN_STARTED)) {
+                screen_manager_set_push_to_talk_active(controls->screen_manager, true);
+            }
             break;
         case 't':
             product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_RECORDING_ENDED);
+            screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 's':
             product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STARTED);
             break;
         case 'x':
             product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STOPPED);
+            screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 'o':
             product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_DISCONNECTED);
+            screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 'e':
             product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TEMPORARY_ERROR);
@@ -306,17 +399,45 @@ static void apply_key(simulator_controls_t* controls, uint32_t key) {
             controls->envelope = controls->envelope <= 100 ? 0 : controls->envelope - 100;
             product_ui_set_playback_envelope(controls->product_ui, controls->envelope);
             break;
+        case ',':
+            screen_manager_handle_swipe(controls->screen_manager, SCREEN_MANAGER_SWIPE_RIGHT);
+            break;
+        case '.':
+            screen_manager_handle_swipe(controls->screen_manager, SCREEN_MANAGER_SWIPE_LEFT);
+            break;
         default:
             return;
     }
-    printf("state=%s envelope_target=%u\n",
+    screen_manager_set_conversation_state(controls->screen_manager,
+                                          product_ui_get_state(controls->product_ui));
+    printf("state=%s screen=%s envelope_target=%u\n",
            product_ui_state_name(product_ui_get_state(controls->product_ui)),
+           screen_manager_screen_name(screen_manager_get_visible_screen(controls->screen_manager)),
            (unsigned)controls->envelope);
 }
 
 static void on_key(lv_event_t* event) {
     simulator_controls_t* controls = lv_event_get_user_data(event);
     apply_key(controls, lv_event_get_key(event));
+}
+
+static void on_gesture(lv_event_t* event) {
+    screen_manager_t* screen_manager = lv_event_get_user_data(event);
+    lv_indev_t* input = lv_event_get_indev(event);
+    if (screen_manager == NULL || input == NULL) {
+        return;
+    }
+
+    switch (lv_indev_get_gesture_dir(input)) {
+        case LV_DIR_LEFT:
+            screen_manager_handle_swipe(screen_manager, SCREEN_MANAGER_SWIPE_LEFT);
+            break;
+        case LV_DIR_RIGHT:
+            screen_manager_handle_swipe(screen_manager, SCREEN_MANAGER_SWIPE_RIGHT);
+            break;
+        default:
+            break;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -332,10 +453,11 @@ int main(int argc, char** argv) {
         argc == 2 && strcmp(argv[1], "--inspect-clock-unsynchronized") == 0;
     const bool trace_clock = argc == 5 && strcmp(argv[1], "--trace-clock-updates") == 0;
     const bool inspect_clock_zone = argc == 4 && strcmp(argv[1], "--inspect-clock-zone") == 0;
+    const bool navigation_trace = argc == 3 && strcmp(argv[1], "--trace-navigation") == 0;
     const bool interactive = argc == 1;
     if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace &&
         !render_clock && !render_clock_unsynchronized && !inspect_clock_epoch &&
-        !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone) {
+        !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone && !navigation_trace) {
         print_usage(argv[0]);
         return 2;
     }
@@ -410,14 +532,24 @@ int main(int argc, char** argv) {
         fputs("Clock Screen accepted invalid input or blocks pointer input.\n", stderr);
         return 1;
     }
-    lv_obj_add_flag(clock_screen_get_root(clock_screen), LV_OBJ_FLAG_HIDDEN);
     if (!is_interaction_transparent(product_ui_get_root(product_ui))) {
         fputs("Product UI blocks pointer input.\n", stderr);
         return 1;
     }
 
+    screen_manager_t* screen_manager = screen_manager_create(product_ui, clock_screen);
+    if (screen_manager == NULL || screen_manager_create(NULL, clock_screen) != NULL ||
+        screen_manager_create(product_ui, NULL) != NULL) {
+        fputs("Failed to create the Screen Manager or invalid input was accepted.\n", stderr);
+        return 1;
+    }
+    lv_obj_add_event_cb(lv_screen_active(), on_gesture, LV_EVENT_GESTURE, screen_manager);
+
     if (event_trace) {
         return trace_events(product_ui, argv[2]);
+    }
+    if (navigation_trace) {
+        return trace_navigation(screen_manager, product_ui, clock_screen, argv[2]);
     }
 
     if (inspect_clock_epoch || inspect_clock_unsynchronized) {
@@ -460,8 +592,7 @@ int main(int argc, char** argv) {
     }
 
     if (render_clock || render_clock_unsynchronized) {
-        lv_obj_add_flag(product_ui_get_root(product_ui), LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(clock_screen_get_root(clock_screen), LV_OBJ_FLAG_HIDDEN);
+        screen_manager_handle_swipe(screen_manager, SCREEN_MANAGER_SWIPE_LEFT);
         if (!update_clock(clock_screen, clock_epoch, render_clock)) {
             fputs("Failed to render the injected clock epoch.\n", stderr);
             return 1;
@@ -476,6 +607,7 @@ int main(int argc, char** argv) {
 
     simulator_controls_t controls = {
         .product_ui = product_ui,
+        .screen_manager = screen_manager,
         .envelope = 0,
     };
     lv_indev_t* keyboard = lv_sdl_keyboard_create();
@@ -484,13 +616,13 @@ int main(int argc, char** argv) {
         fputs("Failed to create simulator keyboard controls.\n", stderr);
         return 1;
     }
-    lv_group_add_obj(keyboard_group, product_ui_get_root(product_ui));
+    lv_group_add_obj(keyboard_group, lv_screen_active());
     lv_indev_set_group(keyboard, keyboard_group);
-    lv_obj_add_event_cb(product_ui_get_root(product_ui), on_key, LV_EVENT_KEY, &controls);
+    lv_obj_add_event_cb(lv_screen_active(), on_key, LV_EVENT_KEY, &controls);
 
     puts(
         "Controls: i connect/cancel, l listen, t think, s speak, x stop, "
-        "o offline, e error, r recover, +/- playback level");
+        "o offline, e error, r recover, +/- playback level, ,/. navigate");
     while (true) {
         lv_timer_handler();
         lv_delay_ms(5);

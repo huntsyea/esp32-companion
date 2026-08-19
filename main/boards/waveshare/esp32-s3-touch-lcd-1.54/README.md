@@ -60,3 +60,7 @@ setting at startup. The current release supports `America/Chicago` and uses it
 as the default. The device stores UTC system time; the platform time adapter
 maps the configured name to the POSIX daylight-saving rule used by ESP newlib.
 An unsupported setting is reported and falls back to `America/Chicago`.
+
+Swipe left to select the Clock Screen and right to select the Avatar Screen.
+Navigation does not wrap at either edge. Conversation activity can temporarily
+present the Avatar Screen without replacing the screen selected by the user.

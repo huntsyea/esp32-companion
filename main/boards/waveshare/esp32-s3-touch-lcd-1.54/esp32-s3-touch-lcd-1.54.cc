@@ -9,6 +9,7 @@
 #include "companion_time.h"
 #include "mcp_server.h"
 #include "product_ui.h"
+#include "screen_manager.h"
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -83,8 +84,14 @@ public:
         clock_screen_ = clock_screen_create(lv_screen_active());
         if (clock_screen_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create Clock Screen");
-        } else {
-            lv_obj_add_flag(clock_screen_get_root(clock_screen_), LV_OBJ_FLAG_HIDDEN);
+        }
+        if (product_ui_ != nullptr && clock_screen_ != nullptr) {
+            screen_manager_ = screen_manager_create(product_ui_, clock_screen_);
+            if (screen_manager_ == nullptr) {
+                ESP_LOGE(TAG, "Failed to create Screen Manager");
+            } else {
+                lv_obj_add_event_cb(lv_screen_active(), OnGesture, LV_EVENT_GESTURE, this);
+            }
         }
     }
 
@@ -112,8 +119,28 @@ public:
     }
 
 private:
+    static void OnGesture(lv_event_t* event) {
+        auto* display = static_cast<CompanionDisplay*>(lv_event_get_user_data(event));
+        lv_indev_t* input = lv_event_get_indev(event);
+        if (display == nullptr || display->screen_manager_ == nullptr || input == nullptr) {
+            return;
+        }
+
+        switch (lv_indev_get_gesture_dir(input)) {
+            case LV_DIR_LEFT:
+                screen_manager_handle_swipe(display->screen_manager_, SCREEN_MANAGER_SWIPE_LEFT);
+                break;
+            case LV_DIR_RIGHT:
+                screen_manager_handle_swipe(display->screen_manager_, SCREEN_MANAGER_SWIPE_RIGHT);
+                break;
+            default:
+                break;
+        }
+    }
+
     product_ui_t* product_ui_ = nullptr;
     clock_screen_t* clock_screen_ = nullptr;
+    screen_manager_t* screen_manager_ = nullptr;
     bool time_synchronized_ = false;
 };
 
