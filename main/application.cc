@@ -322,6 +322,7 @@ void Application::HandleActivationDoneEvent() {
     has_server_time_ = ota_->HasServerTime();
 
     auto display = Board::GetInstance().GetDisplay();
+    display->SetTimeSynchronized(has_server_time_);
     std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
     display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");

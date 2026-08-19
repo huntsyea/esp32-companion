@@ -1,3 +1,5 @@
+#include "clock_screen.h"
+#include "companion_time.h"
 #include "product_ui.h"
 
 #include "lvgl.h"
@@ -21,7 +23,11 @@ typedef struct {
 static void print_usage(const char* program) {
     fprintf(stderr,
             "Usage: %s [--smoke-test | --render-reference PATH | "
-            "--render-state STATE TIME_MS ENVELOPE PATH | --trace-events EVENTS]\n",
+            "--render-state STATE TIME_MS ENVELOPE PATH | --trace-events EVENTS | "
+            "--render-clock EPOCH PATH | --render-clock-unsynchronized PATH | "
+            "--inspect-clock EPOCH | --inspect-clock-unsynchronized | "
+            "--trace-clock-updates FIRST SAME_MINUTE NEXT_MINUTE | "
+            "--inspect-clock-zone ZONE EPOCH]\n",
             program);
 }
 
@@ -102,6 +108,63 @@ static bool parse_unsigned(const char* text, uint32_t maximum, uint32_t* value) 
     }
     *value = (uint32_t)parsed;
     return true;
+}
+
+static bool parse_epoch(const char* text, int64_t* epoch) {
+    if (text == NULL || *text == '\0' || *text == '-') {
+        return false;
+    }
+    errno = 0;
+    char* end = NULL;
+    const unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed > INT64_MAX) {
+        return false;
+    }
+    *epoch = (int64_t)parsed;
+    return true;
+}
+
+static bool update_clock(clock_screen_t* clock_screen, int64_t epoch, bool synchronized) {
+    companion_local_time_t local_time;
+    if (!companion_time_from_epoch(epoch, synchronized, &local_time)) {
+        return false;
+    }
+    clock_screen_update(clock_screen, &local_time);
+    return true;
+}
+
+static int inspect_clock(clock_screen_t* clock_screen, int64_t epoch, bool synchronized) {
+    if (!update_clock(clock_screen, epoch, synchronized)) {
+        fputs("Failed to convert the injected clock epoch.\n", stderr);
+        return 1;
+    }
+    const clock_screen_model_t* model = clock_screen_get_model(clock_screen);
+    if (model == NULL) {
+        fputs("Clock model is unavailable.\n", stderr);
+        return 1;
+    }
+    if (!model->synchronized) {
+        puts("sync=no status=TIME_NOT_SYNCED");
+        return 0;
+    }
+    printf("sync=yes time=%s period=%s weekday=%s date=%s dst=%u\n", model->time, model->period,
+           model->weekday, model->date, model->is_dst ? 1U : 0U);
+    return 0;
+}
+
+static int trace_clock_updates(clock_screen_t* clock_screen, const int64_t epochs[3]) {
+    bool changed[3];
+    for (size_t index = 0; index < 3; ++index) {
+        companion_local_time_t local_time;
+        if (!companion_time_from_epoch(epochs[index], true, &local_time)) {
+            fputs("Failed to convert a clock update epoch.\n", stderr);
+            return 1;
+        }
+        changed[index] = clock_screen_update(clock_screen, &local_time);
+    }
+    printf("first=%s same_minute=%s next_minute=%s\n", changed[0] ? "changed" : "unchanged",
+           changed[1] ? "changed" : "unchanged", changed[2] ? "changed" : "unchanged");
+    return 0;
 }
 
 static bool dispatch_state_path(product_ui_t* ui, const char* state_name) {
@@ -261,8 +324,18 @@ int main(int argc, char** argv) {
     const bool legacy_reference = argc == 3 && strcmp(argv[1], "--render-reference") == 0;
     const bool render_state = argc == 6 && strcmp(argv[1], "--render-state") == 0;
     const bool event_trace = argc == 3 && strcmp(argv[1], "--trace-events") == 0;
+    const bool render_clock = argc == 4 && strcmp(argv[1], "--render-clock") == 0;
+    const bool render_clock_unsynchronized =
+        argc == 3 && strcmp(argv[1], "--render-clock-unsynchronized") == 0;
+    const bool inspect_clock_epoch = argc == 3 && strcmp(argv[1], "--inspect-clock") == 0;
+    const bool inspect_clock_unsynchronized =
+        argc == 2 && strcmp(argv[1], "--inspect-clock-unsynchronized") == 0;
+    const bool trace_clock = argc == 5 && strcmp(argv[1], "--trace-clock-updates") == 0;
+    const bool inspect_clock_zone = argc == 4 && strcmp(argv[1], "--inspect-clock-zone") == 0;
     const bool interactive = argc == 1;
-    if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace) {
+    if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace &&
+        !render_clock && !render_clock_unsynchronized && !inspect_clock_epoch &&
+        !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone) {
         print_usage(argv[0]);
         return 2;
     }
@@ -274,6 +347,28 @@ int main(int argc, char** argv) {
         fputs("TIME_MS must be a nonnegative 32-bit integer and ENVELOPE must be 0..1000.\n",
               stderr);
         return 2;
+    }
+
+    int64_t clock_epoch = 0;
+    if ((render_clock || inspect_clock_epoch) && !parse_epoch(argv[2], &clock_epoch)) {
+        fputs("EPOCH must be a nonnegative signed 64-bit integer.\n", stderr);
+        return 2;
+    }
+    if (inspect_clock_zone && !parse_epoch(argv[3], &clock_epoch)) {
+        fputs("EPOCH must be a nonnegative signed 64-bit integer.\n", stderr);
+        return 2;
+    }
+    int64_t clock_update_epochs[3] = {0};
+    if (trace_clock && (!parse_epoch(argv[2], &clock_update_epochs[0]) ||
+                        !parse_epoch(argv[3], &clock_update_epochs[1]) ||
+                        !parse_epoch(argv[4], &clock_update_epochs[2]))) {
+        fputs("Clock update epochs must be nonnegative signed 64-bit integers.\n", stderr);
+        return 2;
+    }
+
+    if (!companion_time_configure(COMPANION_TIMEZONE_NAME)) {
+        fputs("Failed to configure the simulator time zone.\n", stderr);
+        return 1;
     }
 
     lv_init();
@@ -304,6 +399,18 @@ int main(int argc, char** argv) {
         fputs("Failed to create the Product UI.\n", stderr);
         return 1;
     }
+
+    clock_screen_t* clock_screen = clock_screen_create(lv_screen_active());
+    if (clock_screen == NULL || clock_screen_get_root(clock_screen) == NULL) {
+        fputs("Failed to create the Clock Screen.\n", stderr);
+        return 1;
+    }
+    if (clock_screen_create(NULL) != NULL ||
+        !is_interaction_transparent(clock_screen_get_root(clock_screen))) {
+        fputs("Clock Screen accepted invalid input or blocks pointer input.\n", stderr);
+        return 1;
+    }
+    lv_obj_add_flag(clock_screen_get_root(clock_screen), LV_OBJ_FLAG_HIDDEN);
     if (!is_interaction_transparent(product_ui_get_root(product_ui))) {
         fputs("Product UI blocks pointer input.\n", stderr);
         return 1;
@@ -311,6 +418,23 @@ int main(int argc, char** argv) {
 
     if (event_trace) {
         return trace_events(product_ui, argv[2]);
+    }
+
+    if (inspect_clock_epoch || inspect_clock_unsynchronized) {
+        return inspect_clock(clock_screen, clock_epoch, inspect_clock_epoch);
+    }
+    if (inspect_clock_zone) {
+        const bool fallback = !companion_time_configure(argv[2]);
+        if (fallback && !companion_time_configure(COMPANION_TIMEZONE_NAME)) {
+            fputs("Failed to configure the fallback time zone.\n", stderr);
+            return 1;
+        }
+        printf("requested=%s active=%s fallback=%s ", argv[2], COMPANION_TIMEZONE_NAME,
+               fallback ? "yes" : "no");
+        return inspect_clock(clock_screen, clock_epoch, true);
+    }
+    if (trace_clock) {
+        return trace_clock_updates(clock_screen, clock_update_epochs);
     }
 
     for (int iteration = 0; iteration < 10; ++iteration) {
@@ -333,6 +457,17 @@ int main(int argc, char** argv) {
         product_ui_set_animation_time(product_ui, 0);
         product_ui_set_animation_time(product_ui, reference_time);
         return write_reference_image(product_ui_get_root(product_ui), argv[5]);
+    }
+
+    if (render_clock || render_clock_unsynchronized) {
+        lv_obj_add_flag(product_ui_get_root(product_ui), LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(clock_screen_get_root(clock_screen), LV_OBJ_FLAG_HIDDEN);
+        if (!update_clock(clock_screen, clock_epoch, render_clock)) {
+            fputs("Failed to render the injected clock epoch.\n", stderr);
+            return 1;
+        }
+        return write_reference_image(clock_screen_get_root(clock_screen),
+                                     render_clock ? argv[3] : argv[2]);
     }
 
     if (smoke_test) {

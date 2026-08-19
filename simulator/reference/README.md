@@ -27,3 +27,20 @@ Regenerate a frame only when an intentional visual change is approved:
 an explicit antialiasing tolerance. It also checks the colors, geometry bounds,
 content area, and unclipped display border. `scripts/tests/test_product_ui_state.py`
 checks all state frames at their fixed inputs and samples bounded idle motion.
+
+## Clock reference frames
+
+`clock-noon.ppm` renders UTC epoch `1768500000` through the configured
+`America/Chicago` POSIX rule. It verifies 12-hour noon formatting, the weekday,
+and the date. `clock-unsynchronized.ppm` pins the explicit network-time failure
+surface. Both frames use the same native Clock Screen source as the device.
+
+```sh
+./simulator/run.sh --render-clock 1768500000 simulator/reference/clock-noon.ppm
+./simulator/run.sh --render-clock-unsynchronized \
+  simulator/reference/clock-unsynchronized.ppm
+```
+
+`scripts/tests/test_companion_clock.py` also injects UTC epochs for midnight,
+date rollover, both Chicago daylight-saving transitions, and continued clock
+advancement without transport events.

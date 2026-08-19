@@ -881,7 +881,11 @@ file(GLOB BOARD_SOURCES
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54)
-    list(APPEND SOURCES "product_ui/product_ui.c")
+    list(APPEND SOURCES
+        "product_ui/clock_screen.c"
+        "product_ui/companion_time.c"
+        "product_ui/product_ui.c"
+    )
     list(APPEND INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/product_ui")
 endif()
 

@@ -54,3 +54,9 @@ This board is the pinned production target for the Companion Device. See
 shared macOS simulator, device build, hardware diagnostics, and factory recovery
 procedure. Do not flash hardware until the external factory backup checksum has
 been verified and the flash has been approved.
+
+The Clock Screen reads the IANA time-zone name from the `clock/timezone` NVS
+setting at startup. The current release supports `America/Chicago` and uses it
+as the default. The device stores UTC system time; the platform time adapter
+maps the configured name to the POSIX daylight-saving rule used by ESP newlib.
+An unsupported setting is reported and falls back to `America/Chicago`.

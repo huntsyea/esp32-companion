@@ -5,6 +5,8 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "clock_screen.h"
+#include "companion_time.h"
 #include "mcp_server.h"
 #include "product_ui.h"
 
@@ -17,8 +19,10 @@
 #include <esp_lcd_panel_ops.h>
 
 #include <esp_timer.h>
+#include <time.h>
 
 #include "power_save_timer.h"
+#include "settings.h"
 #include "assets/lang_config.h"
 
 #include <esp_lcd_touch_cst816s.h>
@@ -61,15 +65,56 @@ public:
         }
 
         SpiLcdDisplay::SetupUI();
+        Settings clock_settings("clock");
+        const std::string configured_timezone =
+            clock_settings.GetString("timezone", COMPANION_TIMEZONE_NAME);
+        if (!companion_time_configure(configured_timezone.c_str())) {
+            ESP_LOGW(TAG, "Unsupported time zone %s; using %s", configured_timezone.c_str(),
+                     COMPANION_TIMEZONE_NAME);
+            if (!companion_time_configure(COMPANION_TIMEZONE_NAME)) {
+                ESP_LOGE(TAG, "Failed to configure fallback time zone");
+            }
+        }
         DisplayLockGuard lock(this);
         product_ui_ = product_ui_create(lv_screen_active());
         if (product_ui_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create Product UI");
         }
+        clock_screen_ = clock_screen_create(lv_screen_active());
+        if (clock_screen_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create Clock Screen");
+        } else {
+            lv_obj_add_flag(clock_screen_get_root(clock_screen_), LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    void UpdateStatusBar(bool update_all = false) override {
+        SpiLcdDisplay::UpdateStatusBar(update_all);
+        if (clock_screen_ == nullptr) {
+            return;
+        }
+
+        const time_t epoch = time(nullptr);
+        companion_local_time_t local_time{};
+        if (!companion_time_from_epoch((int64_t)epoch, time_synchronized_, &local_time)) {
+            local_time.synchronized = false;
+        }
+        if (!Lock(1)) {
+            return;
+        }
+        clock_screen_update(clock_screen_, &local_time);
+        Unlock();
+    }
+
+    void SetTimeSynchronized(bool synchronized) override {
+        time_synchronized_ = synchronized;
+        UpdateStatusBar(true);
     }
 
 private:
     product_ui_t* product_ui_ = nullptr;
+    clock_screen_t* clock_screen_ = nullptr;
+    bool time_synchronized_ = false;
 };
 
 class CustomBoard : public WifiBoard {

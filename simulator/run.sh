@@ -10,7 +10,10 @@ cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}"
 
 if [[ "${1:-}" == "--smoke-test" || "${1:-}" == "--render-reference" ||
-      "${1:-}" == "--render-state" || "${1:-}" == "--trace-events" ]]; then
+      "${1:-}" == "--render-state" || "${1:-}" == "--trace-events" ||
+      "${1:-}" == "--render-clock" || "${1:-}" == "--render-clock-unsynchronized" ||
+      "${1:-}" == "--inspect-clock" || "${1:-}" == "--inspect-clock-unsynchronized" ||
+      "${1:-}" == "--trace-clock-updates" || "${1:-}" == "--inspect-clock-zone" ]]; then
     export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
 fi
 

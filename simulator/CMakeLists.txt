@@ -32,6 +32,8 @@ target_link_libraries(lvgl PUBLIC PkgConfig::SDL2)
 
 add_executable(companion-simulator
     "main.c"
+    "../main/product_ui/clock_screen.c"
+    "../main/product_ui/companion_time.c"
     "../main/product_ui/product_ui.c"
 )
 
