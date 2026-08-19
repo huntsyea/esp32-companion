@@ -310,6 +310,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
+    display->SetConversationEvent(ConversationEvent::kDisconnected);
     display->UpdateStatusBar(true);
 }
 
@@ -520,7 +521,19 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
-    protocol_->OnConnected([this]() { DismissAlert(); });
+    protocol_->OnConnected([this]() {
+        Schedule([this]() {
+            Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kConnected);
+            DismissAlert();
+        });
+    });
+
+    protocol_->OnDisconnected([this]() {
+        Schedule([]() {
+            Board::GetInstance().GetDisplay()->SetConversationEvent(
+                ConversationEvent::kDisconnected);
+        });
+    });
 
     protocol_->OnNetworkError([this](const std::string& message) {
         last_error_message_ = message;

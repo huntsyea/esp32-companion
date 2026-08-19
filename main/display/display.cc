@@ -30,6 +30,8 @@ void Display::UpdateStatusBar(bool update_all) {}
 
 void Display::SetTimeSynchronized(bool synchronized) {}
 
+void Display::SetConversationEvent(ConversationEvent event) { (void)event; }
+
 void Display::SetEmotion(const char* emotion) { ESP_LOGW(TAG, "SetEmotion: %s", emotion); }
 
 void Display::SetChatMessage(const char* role, const char* content) {

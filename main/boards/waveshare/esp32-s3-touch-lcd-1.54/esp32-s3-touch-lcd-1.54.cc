@@ -126,6 +126,47 @@ public:
         UpdateStatusBar(true);
     }
 
+    void SetConversationEvent(ConversationEvent event) override {
+        if (screen_manager_ == nullptr || !Lock(1)) {
+            return;
+        }
+        product_ui_event_t product_event = PRODUCT_UI_EVENT_DISCONNECTED;
+        switch (event) {
+            case ConversationEvent::kConnected:
+                product_event = PRODUCT_UI_EVENT_CONNECTED;
+                break;
+            case ConversationEvent::kDisconnected:
+                product_event = PRODUCT_UI_EVENT_DISCONNECTED;
+                break;
+            case ConversationEvent::kListenStarted:
+                product_event = PRODUCT_UI_EVENT_LISTEN_STARTED;
+                break;
+            case ConversationEvent::kRecordingEnded:
+                product_event = PRODUCT_UI_EVENT_RECORDING_ENDED;
+                break;
+            case ConversationEvent::kTtsStarted:
+                product_event = PRODUCT_UI_EVENT_TTS_STARTED;
+                break;
+            case ConversationEvent::kTtsStopped:
+                product_event = PRODUCT_UI_EVENT_TTS_STOPPED;
+                break;
+            case ConversationEvent::kCancelled:
+                product_event = PRODUCT_UI_EVENT_CANCELLED;
+                break;
+            case ConversationEvent::kTemporaryError:
+                product_event = PRODUCT_UI_EVENT_TEMPORARY_ERROR;
+                break;
+            case ConversationEvent::kErrorRecovered:
+                product_event = PRODUCT_UI_EVENT_ERROR_RECOVERED;
+                break;
+            default:
+                Unlock();
+                return;
+        }
+        screen_manager_dispatch_event(screen_manager_, product_event);
+        Unlock();
+    }
+
 private:
     static void OnGesture(lv_event_t* event) {
         auto* display = static_cast<CompanionDisplay*>(lv_event_get_user_data(event));

@@ -18,6 +18,18 @@
 #include <string>
 #include <vector>
 
+enum class ConversationEvent {
+    kConnected,
+    kDisconnected,
+    kListenStarted,
+    kRecordingEnded,
+    kTtsStarted,
+    kTtsStopped,
+    kCancelled,
+    kTemporaryError,
+    kErrorRecovered,
+};
+
 class Theme {
 public:
     Theme(const std::string& name) : name_(name) {}
@@ -44,6 +56,7 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetTimeSynchronized(bool synchronized);
+    virtual void SetConversationEvent(ConversationEvent event);
     virtual void SetPowerSaveMode(bool on);
     virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) { return false; }
     virtual void ClearTextGlyphs() {}
