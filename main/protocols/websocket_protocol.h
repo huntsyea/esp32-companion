@@ -9,6 +9,8 @@
 #include <freertos/event_groups.h>
 #include <web_socket.h>
 
+#include <atomic>
+
 #define WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
 
 class WebsocketProtocol : public Protocol {
@@ -21,6 +23,7 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
+    bool RequiresConversationSessionId() const override { return strict_session_validation_; }
 
 private:
     EventGroupHandle_t event_group_handle_;
@@ -30,6 +33,8 @@ private:
     int version_ = 1;
     bool intentional_close_ = false;
     bool channel_connected_ = false;
+    std::atomic<uint32_t> transport_generation_{0};
+    bool strict_session_validation_ = false;
 
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;

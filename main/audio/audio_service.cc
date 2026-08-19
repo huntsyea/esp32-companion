@@ -174,18 +174,23 @@ void AudioService::Start() {
 void AudioService::Stop() {
     esp_timer_stop(audio_power_timer_);
     service_stopped_.store(true);
+    capture_accepting_.store(false);
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING |
                                          AS_EVENT_AUDIO_PROCESSOR_RUNNING);
 
     bool notify_drained = false;
+    bool notify_capture_drained = false;
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
         ++playback_generation_;
+        ++capture_generation_;
         audio_encode_queue_.clear();
+        audio_send_queue_.clear();
         audio_decode_queue_.clear();
         audio_playback_queue_.clear();
         audio_testing_queue_.clear();
         notify_drained = MarkPlaybackDrainedLocked();
+        notify_capture_drained = MarkCaptureDrainedLocked();
         audio_queue_cv_.notify_all();
     }
     if (callbacks_.on_playback_envelope) {
@@ -193,6 +198,9 @@ void AudioService::Stop() {
     }
     if (notify_drained && callbacks_.on_playback_drained) {
         callbacks_.on_playback_drained();
+    }
+    if (notify_capture_drained && callbacks_.on_capture_drained) {
+        callbacks_.on_capture_drained();
     }
 }
 
@@ -471,6 +479,9 @@ void AudioService::OpusCodecTask() {
         if (!audio_encode_queue_.empty()) {
             auto task = std::move(audio_encode_queue_.front());
             audio_encode_queue_.pop_front();
+            if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                capture_in_flight_ = true;
+            }
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -495,16 +506,20 @@ void AudioService::OpusCodecTask() {
                     packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
 
                     if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                        bool packet_accepted = false;
                         {
                             std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
-                            /* Never let a full send queue stall encoding: stale realtime
-                             * audio is useless to the server, so drop the oldest packet. */
-                            if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
-                                audio_send_queue_.pop_front();
+                            if (task->generation == capture_generation_) {
+                                /* Never let a full send queue stall encoding: stale realtime
+                                 * audio is useless to the server, so drop the oldest packet. */
+                                if (audio_send_queue_.size() >= MAX_SEND_PACKETS_IN_QUEUE) {
+                                    audio_send_queue_.pop_front();
+                                }
+                                audio_send_queue_.push_back(std::move(packet));
+                                packet_accepted = true;
                             }
-                            audio_send_queue_.push_back(std::move(packet));
                         }
-                        if (callbacks_.on_send_queue_available) {
+                        if (packet_accepted && callbacks_.on_send_queue_available) {
                             callbacks_.on_send_queue_available();
                         }
                     } else if (task->type == kAudioTaskTypeEncodeToTestingQueue) {
@@ -520,6 +535,17 @@ void AudioService::OpusCodecTask() {
                          "Failed to encode audio: encoder not configured or invalid frame size "
                          "(got %u, expected %u)",
                          task->pcm.size(), encoder_frame_size_);
+            }
+            bool notify_capture_drained = false;
+            lock.lock();
+            if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                capture_in_flight_ = false;
+                notify_capture_drained = MarkCaptureDrainedLocked();
+            }
+            audio_queue_cv_.notify_all();
+            lock.unlock();
+            if (notify_capture_drained && callbacks_.on_capture_drained) {
+                callbacks_.on_capture_drained();
             }
             lock.lock();
         }
@@ -574,6 +600,14 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
     {
         /* Push the task to the encode queue */
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+
+        if (type == kAudioTaskTypeEncodeToSendQueue && !capture_accepting_.load()) {
+            return;
+        }
+        if (type == kAudioTaskTypeEncodeToSendQueue) {
+            task->generation = capture_generation_;
+            capture_drained_notified_ = false;
+        }
 
         /* If the task is to send queue, we need to set the timestamp */
         if (type == kAudioTaskTypeEncodeToSendQueue && !timestamp_queue_.empty()) {
@@ -632,13 +666,21 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-    if (audio_send_queue_.empty()) {
-        return nullptr;
+    std::unique_ptr<AudioStreamPacket> packet;
+    bool notify_capture_drained = false;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        if (audio_send_queue_.empty()) {
+            return nullptr;
+        }
+        packet = std::move(audio_send_queue_.front());
+        audio_send_queue_.pop_front();
+        notify_capture_drained = MarkCaptureDrainedLocked();
+        audio_queue_cv_.notify_all();
     }
-    auto packet = std::move(audio_send_queue_.front());
-    audio_send_queue_.pop_front();
-    audio_queue_cv_.notify_all();
+    if (notify_capture_drained && callbacks_.on_capture_drained) {
+        callbacks_.on_capture_drained();
+    }
     return packet;
 }
 
@@ -692,6 +734,7 @@ bool AudioService::EnableVoiceProcessing(bool enable) {
             return false;
         }
         ResetDecoder();
+        capture_accepting_.store(true);
         audio_input_need_warmup_ = true;
         {
             std::lock_guard<std::mutex> lock(input_resampler_mutex_);
@@ -702,6 +745,7 @@ bool AudioService::EnableVoiceProcessing(bool enable) {
         audio_engine_->EnableVoiceProcessing(true);
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
     } else {
+        capture_accepting_.store(false);
         if (audio_engine_initialized_) {
             audio_engine_->EnableVoiceProcessing(false);
         }
@@ -772,6 +816,33 @@ bool AudioService::IsPlaybackIdle() {
     return IsPlaybackDrainedLocked();
 }
 
+bool AudioService::IsCaptureIdle() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return IsCaptureDrainedLocked();
+}
+
+void AudioService::DiscardPendingCapture() {
+    capture_accepting_.store(false);
+    bool notify_capture_drained = false;
+    {
+        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+        ++capture_generation_;
+        for (auto iterator = audio_encode_queue_.begin(); iterator != audio_encode_queue_.end();) {
+            if ((*iterator)->type == kAudioTaskTypeEncodeToSendQueue) {
+                iterator = audio_encode_queue_.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+        audio_send_queue_.clear();
+        notify_capture_drained = MarkCaptureDrainedLocked();
+        audio_queue_cv_.notify_all();
+    }
+    if (notify_capture_drained && callbacks_.on_capture_drained) {
+        callbacks_.on_capture_drained();
+    }
+}
+
 void AudioService::ResetDecoder() {
     bool notify_drained = false;
     {
@@ -785,6 +856,8 @@ void AudioService::ResetDecoder() {
         timestamp_queue_.clear();
         audio_decode_queue_.clear();
         audio_playback_queue_.clear();
+        // OutputData is synchronous. A reset can leave only its current call active,
+        // so cancellation completes within one codec OutputData call (one 60 ms frame).
         audio_testing_queue_.clear();
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
@@ -807,6 +880,26 @@ bool AudioService::MarkPlaybackDrainedLocked() {
         return false;
     }
     playback_drained_notified_ = true;
+    return true;
+}
+
+bool AudioService::IsCaptureDrainedLocked() const {
+    if (capture_in_flight_ || !audio_send_queue_.empty()) {
+        return false;
+    }
+    for (const auto& task : audio_encode_queue_) {
+        if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AudioService::MarkCaptureDrainedLocked() {
+    if (!IsCaptureDrainedLocked() || capture_drained_notified_) {
+        return false;
+    }
+    capture_drained_notified_ = true;
     return true;
 }
 

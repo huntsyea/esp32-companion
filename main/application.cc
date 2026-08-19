@@ -83,6 +83,9 @@ void Application::Initialize() {
     callbacks.on_playback_drained = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_DRAINED);
     };
+    callbacks.on_capture_drained = [this]() {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_CAPTURE_DRAINED);
+    };
     callbacks.on_playback_envelope = [this](uint16_t level_milli) {
         pending_playback_envelope_.store(level_milli);
         xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_ENVELOPE);
@@ -178,22 +181,14 @@ void Application::Run() {
         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_PLAYBACK_ENVELOPE;
+        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_PLAYBACK_ENVELOPE |
+        MAIN_EVENT_CAPTURE_DRAINED;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
-            auto display = Board::GetInstance().GetDisplay();
-            tts_downlink_active_.store(false);
-            pending_tts_stop_ = false;
-            audio_service_.ResetDecoder();
-            display->SetPlaybackEnvelope(0);
-            remote_recording_active_ = false;
-            manual_listening_requested_.store(false);
-            display->SetPushToTalkActive(false);
-            display->SetConversationEvent(ConversationEvent::kTemporaryError);
-            SetDeviceState(kDeviceStateIdle);
+            RecoverConversation(ConversationFailure::kTransport);
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
                   Lang::Sounds::OGG_EXCLAMATION);
         }
@@ -231,6 +226,10 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_ENVELOPE) {
             Board::GetInstance().GetDisplay()->SetPlaybackEnvelope(
                 pending_playback_envelope_.load());
+        }
+
+        if (bits & MAIN_EVENT_CAPTURE_DRAINED) {
+            FinishListeningAfterCaptureDrain();
         }
 
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
@@ -324,9 +323,11 @@ void Application::HandleNetworkConnectedEvent() {
 void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
-    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
-        state == kDeviceStateSpeaking) {
+    if (protocol_ && ShouldCloseConversationOnNetworkLoss(
+                         state == kDeviceStateConnecting, state == kDeviceStateListening,
+                         state == kDeviceStateSpeaking, conversation_session_.IsActive())) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+        RecoverConversation(ConversationFailure::kTransport, false);
         protocol_->CloseAudioChannel();
     }
 
@@ -568,12 +569,13 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (tts_downlink_active_.load()) {
+        if (tts_downlink_.Accept(conversation_session_.Matches(packet->session_id))) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
         }
     });
 
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        conversation_session_.Open(protocol_->session_id());
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG,
@@ -585,18 +587,12 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        tts_downlink_active_.store(false);
-        Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
-            pending_tts_stop_ = false;
-            audio_service_.ResetDecoder();
-            display->SetPlaybackEnvelope(0);
-            remote_recording_active_ = false;
-            manual_listening_requested_.store(false);
-            display->SetPushToTalkActive(false);
-            display->SetChatMessage("system", "");
-            SetDeviceState(kDeviceStateIdle);
-        });
+        const bool interrupted_conversation = conversation_session_.IsActive();
+        conversation_session_.Close();
+        tts_downlink_.Stop();
+        if (interrupted_conversation) {
+            Schedule([this]() { RecoverConversation(ConversationFailure::kTransport, false); });
+        }
     });
 
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
@@ -606,15 +602,30 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Incoming JSON message has no type");
             return;
         }
+        const bool conversation_message =
+            strcmp(type->valuestring, "tts") == 0 || strcmp(type->valuestring, "stt") == 0 ||
+            strcmp(type->valuestring, "llm") == 0 || strcmp(type->valuestring, "error") == 0;
+        std::string session_id;
+        uint32_t epoch = 0;
+        if (conversation_message && !IncomingSessionMatches(root, session_id, epoch)) {
+            ESP_LOGW(TAG, "Rejected stale conversation message");
+            return;
+        }
+
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (!cJSON_IsString(state)) {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                // Open the downlink gate before scheduling UI work. The first
+                // binary packet may follow the start frame immediately.
                 audio_service_.ResetDecoder();
-                tts_downlink_active_.store(true);
-                Schedule([this, display]() {
+                tts_downlink_.Start();
+                Schedule([this, display, session_id, epoch]() {
+                    if (!conversation_session_.Matches(session_id, epoch)) {
+                        return;
+                    }
                     aborted_ = false;
                     remote_recording_active_ = false;
                     pending_tts_stop_ = false;
@@ -623,9 +634,13 @@ void Application::InitializeProtocol() {
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                tts_downlink_active_.store(false);
-                Schedule([this]() {
+                tts_downlink_.Stop();
+                Schedule([this, session_id, epoch]() {
+                    if (!conversation_session_.Matches(session_id, epoch)) {
+                        return;
+                    }
                     pending_tts_stop_ = true;
+                    pending_tts_stop_epoch_ = epoch;
                     if (audio_service_.IsPlaybackIdle()) {
                         FinishTtsPlayback();
                     }
@@ -638,8 +653,12 @@ void Application::InitializeProtocol() {
                     if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                         glyphs.clear();
                     }
-                    Schedule([display, message = std::string(text->valuestring),
-                              glyphs = std::move(glyphs), bpp]() {
+                    Schedule([this, display, session_id, epoch,
+                              message = std::string(text->valuestring), glyphs = std::move(glyphs),
+                              bpp]() {
+                        if (!conversation_session_.Matches(session_id, epoch)) {
+                            return;
+                        }
                         display->AddTextGlyphs(glyphs, bpp);
                         display->SetTranscript(message.c_str());
                     });
@@ -653,8 +672,12 @@ void Application::InitializeProtocol() {
                 if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                     glyphs.clear();
                 }
-                Schedule([display, message = std::string(text->valuestring),
-                          glyphs = std::move(glyphs), bpp]() {
+                Schedule([this, display, session_id, epoch,
+                          message = std::string(text->valuestring), glyphs = std::move(glyphs),
+                          bpp]() {
+                    if (!conversation_session_.Matches(session_id, epoch)) {
+                        return;
+                    }
                     display->AddTextGlyphs(glyphs, bpp);
                     display->SetTranscript(message.c_str());
                 });
@@ -663,15 +686,41 @@ void Application::InitializeProtocol() {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring),
+                Schedule([this, display, session_id, epoch,
+                          emotion_str = std::string(emotion->valuestring),
                           message = cJSON_IsString(text) ? std::string(text->valuestring)
                                                          : std::string()]() {
+                    if (!conversation_session_.Matches(session_id, epoch)) {
+                        return;
+                    }
                     display->SetEmotion(emotion_str.c_str());
                     if (!message.empty()) {
                         display->SetTranscript(message.c_str());
                     }
                 });
             }
+        } else if (strcmp(type->valuestring, "error") == 0) {
+            auto code = cJSON_GetObjectItem(root, "code");
+            if (!cJSON_IsString(code)) {
+                return;
+            }
+            ConversationFailure failure = ConversationFailure::kAgent;
+            if (strcmp(code->valuestring, "transport") == 0) {
+                failure = ConversationFailure::kTransport;
+            } else if (strcmp(code->valuestring, "microphone") == 0) {
+                failure = ConversationFailure::kMicrophone;
+            } else if (strcmp(code->valuestring, "speaker") == 0) {
+                failure = ConversationFailure::kSpeaker;
+            } else if (strcmp(code->valuestring, "stt") == 0) {
+                failure = ConversationFailure::kStt;
+            } else if (strcmp(code->valuestring, "tts") == 0) {
+                failure = ConversationFailure::kTts;
+            }
+            Schedule([this, session_id, epoch, failure]() {
+                if (conversation_session_.Matches(session_id, epoch)) {
+                    RecoverConversation(failure, false);
+                }
+            });
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
@@ -797,6 +846,11 @@ void Application::HandleToggleChatEvent() {
         return;
     }
 
+    if (conversation_session_.IsActive()) {
+        CancelConversation();
+        return;
+    }
+
     if (state == kDeviceStateIdle) {
         ListeningMode mode = GetDefaultListeningMode();
         if (!protocol_->IsAudioChannelOpened()) {
@@ -809,7 +863,7 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
-        protocol_->CloseAudioChannel();
+        CancelConversation();
     }
 }
 
@@ -907,14 +961,15 @@ void Application::HandleStopListeningEvent() {
         SetDeviceState(kDeviceStateIdle);
     } else if (state == kDeviceStateListening) {
         if (protocol_ && remote_recording_active_) {
-            protocol_->SendStopListening();
-            remote_recording_active_ = false;
-            Board::GetInstance().GetDisplay()->SetConversationEvent(
-                ConversationEvent::kRecordingEnded);
+            audio_service_.EnableVoiceProcessing(false);
+            capture_stop_.Begin(conversation_session_.epoch());
+            if (audio_service_.IsCaptureIdle()) {
+                FinishListeningAfterCaptureDrain();
+            }
         } else {
             Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
+            SetDeviceState(kDeviceStateIdle);
         }
-        SetDeviceState(kDeviceStateIdle);
     }
 }
 
@@ -931,21 +986,7 @@ void Application::HandleWakeWordDetectedEvent() {
         BeginWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
         AbortSpeaking(kAbortReasonWakeWordDetected);
-        // Clear send queue to avoid sending residues to server
-        while (audio_service_.PopPacketFromSendQueue())
-            ;
-
-        if (state == kDeviceStateListening) {
-            protocol_->SendStartListening(GetDefaultListeningMode());
-            audio_service_.ResetDecoder();
-            audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
-            // Re-enable wake word detection as it was stopped by the detection itself
-            audio_service_.EnableWakeWordDetection(true);
-        } else {
-            // Play popup sound and start listening again
-            play_popup_on_listening_ = true;
-            SetListeningMode(GetDefaultListeningMode());
-        }
+        BeginWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateActivating) {
         // Restart the activation check if the wake word is detected during activation
         SetDeviceState(kDeviceStateIdle);
@@ -1085,16 +1126,13 @@ void Application::StartListeningAudio() {
     }
 
     if (!audio_service_.EnableVoiceProcessing(true)) {
-        auto display = Board::GetInstance().GetDisplay();
-        display->SetPushToTalkActive(false);
-        display->SetConversationEvent(ConversationEvent::kCancelled);
-        display->SetConversationEvent(ConversationEvent::kTemporaryError);
-        manual_listening_requested_.store(false);
-        SetDeviceState(kDeviceStateIdle);
+        RecoverConversation(ConversationFailure::kMicrophone, false);
         return;
     }
 
     // Do not start the remote recording until the local microphone path is ready.
+    capture_stop_.Cancel();
+    conversation_session_.StartInteraction();
     protocol_->SendStartListening(listening_mode_);
     remote_recording_active_ = true;
 
@@ -1118,7 +1156,7 @@ void Application::ConfigureWakeWordForListening() {
 }
 
 void Application::FinishTtsPlayback() {
-    if (!pending_tts_stop_) {
+    if (!pending_tts_stop_ || !conversation_session_.IsCurrent(pending_tts_stop_epoch_)) {
         return;
     }
     pending_tts_stop_ = false;
@@ -1129,6 +1167,94 @@ void Application::FinishTtsPlayback() {
         SetDeviceState(listening_mode_ == kListeningModeManualStop ? kDeviceStateIdle
                                                                    : kDeviceStateListening);
     }
+    conversation_session_.Complete(pending_tts_stop_epoch_);
+}
+
+void Application::FinishListeningAfterCaptureDrain() {
+    const uint32_t epoch = conversation_session_.epoch();
+    if (!capture_stop_.Ready(epoch, audio_service_.IsCaptureIdle()) ||
+        !conversation_session_.IsCurrent(epoch)) {
+        return;
+    }
+    capture_stop_.Complete();
+    if (protocol_ && remote_recording_active_) {
+        protocol_->SendStopListening();
+        remote_recording_active_ = false;
+        Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kRecordingEnded);
+    }
+    SetDeviceState(kDeviceStateIdle);
+}
+
+bool Application::IncomingSessionMatches(const cJSON* root, std::string& session_id,
+                                         uint32_t& epoch) const {
+    auto incoming_session = cJSON_GetObjectItem(root, "session_id");
+    if (!cJSON_IsString(incoming_session) || incoming_session->valuestring[0] == '\0') {
+        if (protocol_ && !protocol_->RequiresConversationSessionId()) {
+            return conversation_session_.CaptureCurrent(session_id, epoch);
+        }
+        return false;
+    }
+    session_id = incoming_session->valuestring;
+    return conversation_session_.Capture(session_id, epoch);
+}
+
+void Application::RecoverConversation(ConversationFailure failure, bool notify_protocol) {
+    EndConversation(kAbortReasonNone, failure, notify_protocol);
+}
+
+void Application::CancelConversation(AbortReason reason) {
+    EndConversation(reason, ConversationFailure::kNone, true);
+}
+
+void Application::EndConversation(AbortReason reason, ConversationFailure failure,
+                                  bool notify_protocol) {
+    const bool send_abort = conversation_session_.Cancel();
+    if (send_abort && notify_protocol && protocol_) {
+        protocol_->SendAbortSpeaking(reason);
+    }
+
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.DiscardPendingCapture();
+    audio_service_.ResetDecoder();
+    aborted_ = true;
+    pending_listening_start_ = false;
+    capture_stop_.Cancel();
+    pending_tts_stop_ = false;
+    tts_downlink_.Stop();
+    remote_recording_active_ = false;
+    manual_listening_requested_.store(false);
+
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetPushToTalkActive(false);
+    display->SetPlaybackEnvelope(0);
+    if (failure == ConversationFailure::kNone) {
+        display->SetConversationEvent(ConversationEvent::kCancelled);
+    } else {
+        const char* code = "agent";
+        switch (failure) {
+            case ConversationFailure::kTransport:
+                code = "transport";
+                break;
+            case ConversationFailure::kMicrophone:
+                code = "microphone";
+                break;
+            case ConversationFailure::kSpeaker:
+                code = "speaker";
+                break;
+            case ConversationFailure::kStt:
+                code = "stt";
+                break;
+            case ConversationFailure::kTts:
+                code = "tts";
+                break;
+            case ConversationFailure::kAgent:
+            case ConversationFailure::kNone:
+                break;
+        }
+        ESP_LOGW(TAG, "Conversation recovery category: %s", code);
+        display->SetConversationEvent(ConversationEvent::kTemporaryError);
+    }
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::Schedule(std::function<void()>&& callback) {
@@ -1141,12 +1267,7 @@ void Application::Schedule(std::function<void()>&& callback) {
 
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
-    aborted_ = true;
-    remote_recording_active_ = false;
-    if (protocol_) {
-        protocol_->SendAbortSpeaking(reason);
-    }
-    Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
+    CancelConversation(reason);
 }
 
 void Application::SetListeningMode(ListeningMode mode) {

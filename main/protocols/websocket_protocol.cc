@@ -2,6 +2,7 @@
 #include "application.h"
 #include "board.h"
 #include "companion_connection.h"
+#include "incoming_frame_limits.h"
 #include "settings.h"
 #include "system_info.h"
 
@@ -17,6 +18,9 @@
 #define TAG "WS"
 
 namespace {
+
+constexpr size_t kMaxIncomingAudioFrameBytes = 16 * 1024;
+constexpr size_t kMaxIncomingJsonBytes = 16 * 1024;
 
 bool ProbeMdnsHost(const std::string& configured_host) {
     std::string host = configured_host;
@@ -66,6 +70,7 @@ WebsocketProtocol::WebsocketProtocol()
 
 WebsocketProtocol::~WebsocketProtocol() {
     intentional_close_ = true;
+    ++transport_generation_;
     ResetTransport();
     vEventGroupDelete(event_group_handle_);
 }
@@ -128,13 +133,19 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
     intentional_close_ = true;
+    ++transport_generation_;
+    const bool was_connected = channel_connected_;
     channel_connected_ = false;
     session_id_.clear();
     ResetTransport();
     intentional_close_ = false;
+    if (was_connected && on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
+    }
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
+    const uint32_t transport_generation = ++transport_generation_;
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     std::string token = settings.GetString("token");
@@ -155,6 +166,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     const CompanionConnectionConfig companion = LoadCompanionConnectionConfig(url);
     const bool companion_mode = companion.mode != CompanionConnectionMode::kLegacy;
+    strict_session_validation_ = companion_mode;
     bool use_secure_transport = false;
     if (companion_mode) {
         const CompanionEndpoint endpoint = ResolveCompanionEndpoint(companion, ProbeMdnsHost);
@@ -206,7 +218,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
         websocket_->SetHeader("Client-Id", client_id.c_str());
     }
 
-    auto on_data = [this](const char* data, size_t len, bool binary) {
+    auto on_data = [this, transport_generation](const char* data, size_t len, bool binary) {
+        if (transport_generation != transport_generation_.load()) {
+            return;
+        }
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
@@ -215,7 +230,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
                     }
                     const auto* bp2 = reinterpret_cast<const BinaryProtocol2*>(data);
                     const uint32_t payload_size = ntohl(bp2->payload_size);
-                    if (payload_size > len - sizeof(BinaryProtocol2)) {
+                    if (ntohs(bp2->version) != 2 || bp2->type != 0 ||
+                        !IsValidIncomingFramedPayload(len, sizeof(BinaryProtocol2), payload_size,
+                                                      kMaxIncomingAudioFrameBytes)) {
+                        ESP_LOGW(TAG, "Rejected invalid WebSocket v2 audio frame");
                         return;
                     }
                     const auto* payload = bp2->payload;
@@ -223,6 +241,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = ntohl(bp2->timestamp),
+                        .session_id = session_id_,
                         .payload = std::vector<uint8_t>(payload, payload + payload_size)}));
                 } else if (version_ == 3) {
                     if (len < sizeof(BinaryProtocol3)) {
@@ -230,7 +249,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
                     }
                     const auto* bp3 = reinterpret_cast<const BinaryProtocol3*>(data);
                     const uint16_t payload_size = ntohs(bp3->payload_size);
-                    if (payload_size > len - sizeof(BinaryProtocol3)) {
+                    if (bp3->type != 0 ||
+                        !IsValidIncomingFramedPayload(len, sizeof(BinaryProtocol3), payload_size,
+                                                      kMaxIncomingAudioFrameBytes)) {
+                        ESP_LOGW(TAG, "Rejected invalid WebSocket v3 audio frame");
                         return;
                     }
                     const auto* payload = bp3->payload;
@@ -238,18 +260,28 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = 0,
+                        .session_id = session_id_,
                         .payload = std::vector<uint8_t>(payload, payload + payload_size)}));
                 } else {
+                    if (!IsValidIncomingPayload(len, kMaxIncomingAudioFrameBytes)) {
+                        ESP_LOGW(TAG, "Rejected invalid WebSocket audio frame");
+                        return;
+                    }
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = 0,
+                        .session_id = session_id_,
                         .payload =
                             std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(data),
                                                  reinterpret_cast<const uint8_t*>(data) + len)}));
                 }
             }
         } else {
+            if (!IsValidIncomingPayload(len, kMaxIncomingJsonBytes)) {
+                ESP_LOGW(TAG, "Rejected invalid WebSocket JSON frame size");
+                return;
+            }
             auto root = cJSON_ParseWithLength(data, len);
             if (root == nullptr) {
                 ESP_LOGE(TAG, "Malformed WebSocket JSON frame");
@@ -272,7 +304,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
         last_incoming_time_ = std::chrono::steady_clock::now();
     };
 
-    auto on_disconnected = [this]() {
+    auto on_disconnected = [this, transport_generation]() {
+        if (transport_generation != transport_generation_.load()) {
+            return;
+        }
         ESP_LOGI(TAG, "Websocket disconnected");
         session_id_.clear();
         const bool was_connected = channel_connected_;

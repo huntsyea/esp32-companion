@@ -314,6 +314,7 @@ bool MqttProtocol::OpenAudioChannel() {
         packet->sample_rate = server_sample_rate_;
         packet->frame_duration = server_frame_duration_;
         packet->timestamp = timestamp;
+        packet->session_id = session_id_;
         packet->payload.resize(decrypted_size);
         if (!CryptAesCtr(encrypted, decrypted_size, nonce,
                          reinterpret_cast<uint8_t*>(packet->payload.data()))) {

@@ -11,6 +11,7 @@ struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
+    std::string session_id;
     std::vector<uint8_t> payload;
 };
 
@@ -59,6 +60,7 @@ public:
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
+    virtual bool RequiresConversationSessionId() const { return false; }
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();

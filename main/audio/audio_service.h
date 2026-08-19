@@ -86,6 +86,8 @@ struct AudioServiceCallbacks {
     std::function<void(void)> on_audio_testing_queue_full;
     // Fired when the decode/playback queues and their in-flight work are drained.
     std::function<void(void)> on_playback_drained;
+    // Fired after microphone capture is stopped and all accepted packets are consumed.
+    std::function<void(void)> on_capture_drained;
     // Decoded local speaker level, scaled from 0 to 1000.
     std::function<void(uint16_t)> on_playback_envelope;
 };
@@ -100,6 +102,7 @@ struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
     uint32_t timestamp = 0;
+    uint32_t generation = 0;
 };
 
 struct DebugStatistics {
@@ -124,6 +127,7 @@ public:
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
     bool IsPlaybackIdle();
+    bool IsCaptureIdle();
     bool IsWakeWordRunning() const {
         return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING;
     }
@@ -144,6 +148,7 @@ public:
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    void DiscardPendingCapture();
     void SetModelsList(srmodel_list_t* models_list);
 
 private:
@@ -185,8 +190,11 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     bool decode_in_flight_ = false;
     bool output_in_flight_ = false;
+    bool capture_in_flight_ = false;
     bool playback_drained_notified_ = true;
+    bool capture_drained_notified_ = true;
     uint32_t playback_generation_ = 0;
+    uint32_t capture_generation_ = 0;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
@@ -199,6 +207,7 @@ private:
 #endif
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> audio_input_need_warmup_{false};
+    std::atomic<bool> capture_accepting_{false};
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
@@ -213,6 +222,8 @@ private:
     void CheckAndUpdateAudioPowerState();
     bool IsPlaybackDrainedLocked() const;
     bool MarkPlaybackDrainedLocked();
+    bool IsCaptureDrainedLocked() const;
+    bool MarkCaptureDrainedLocked();
 };
 
 #endif

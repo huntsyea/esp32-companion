@@ -13,7 +13,11 @@
 #include <mutex>
 #include <string>
 
+#include "audio_downlink_gate.h"
 #include "audio_service.h"
+#include "capture_drain_gate.h"
+#include "conversation_recovery_policy.h"
+#include "conversation_session.h"
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "ota.h"
@@ -35,11 +39,22 @@
 #define MAIN_EVENT_STATE_CHANGED (1 << 12)
 #define MAIN_EVENT_PLAYBACK_DRAINED (1 << 13)
 #define MAIN_EVENT_PLAYBACK_ENVELOPE (1 << 14)
+#define MAIN_EVENT_CAPTURE_DRAINED (1 << 15)
 
 enum AecMode {
     kAecOff,
     kAecOnDeviceSide,
     kAecOnServerSide,
+};
+
+enum class ConversationFailure {
+    kNone,
+    kTransport,
+    kMicrophone,
+    kSpeaker,
+    kStt,
+    kAgent,
+    kTts,
 };
 
 class Application {
@@ -88,6 +103,7 @@ public:
     void DismissAlert();
 
     void AbortSpeaking(AbortReason reason);
+    void CancelConversation(AbortReason reason = kAbortReasonNone);
 
     /**
      * Toggle chat state (event-based, thread-safe)
@@ -151,10 +167,13 @@ private:
     bool pending_listening_start_ =
         false;  // Waiting for playback to drain before starting listening (auto mode)
     bool pending_tts_stop_ = false;
+    CaptureDrainGate capture_stop_;
+    uint32_t pending_tts_stop_epoch_ = 0;
     std::atomic<uint16_t> pending_playback_envelope_{0};
-    std::atomic<bool> tts_downlink_active_{false};
+    AudioDownlinkGate tts_downlink_;
     std::atomic<bool> manual_listening_requested_{false};
     bool remote_recording_active_ = false;
+    ConversationSession conversation_session_;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -173,6 +192,10 @@ private:
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
     void FinishTtsPlayback();
+    void FinishListeningAfterCaptureDrain();
+    void RecoverConversation(ConversationFailure failure, bool notify_protocol = true);
+    void EndConversation(AbortReason reason, ConversationFailure failure, bool notify_protocol);
+    bool IncomingSessionMatches(const cJSON* root, std::string& session_id, uint32_t& epoch) const;
 
     // Activation task (runs in background)
     void ActivationTask();
