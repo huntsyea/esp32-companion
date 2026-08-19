@@ -83,6 +83,10 @@ void Application::Initialize() {
     callbacks.on_playback_drained = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_DRAINED);
     };
+    callbacks.on_playback_envelope = [this](uint16_t level_milli) {
+        pending_playback_envelope_.store(level_milli);
+        xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_ENVELOPE);
+    };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -174,13 +178,17 @@ void Application::Run() {
         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED;
+        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_PLAYBACK_ENVELOPE;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
             auto display = Board::GetInstance().GetDisplay();
+            tts_downlink_active_.store(false);
+            pending_tts_stop_ = false;
+            audio_service_.ResetDecoder();
+            display->SetPlaybackEnvelope(0);
             remote_recording_active_ = false;
             manual_listening_requested_.store(false);
             display->SetPushToTalkActive(false);
@@ -207,6 +215,10 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
+            if (pending_tts_stop_ && GetDeviceState() == kDeviceStateSpeaking &&
+                audio_service_.IsPlaybackIdle()) {
+                FinishTtsPlayback();
+            }
             // Deferred listening start (auto mode): the playback queue has
             // drained, so it is now safe to enable voice processing.
             if (pending_listening_start_ && GetDeviceState() == kDeviceStateListening &&
@@ -214,6 +226,11 @@ void Application::Run() {
                 pending_listening_start_ = false;
                 StartListeningAudio();
             }
+        }
+
+        if (bits & MAIN_EVENT_PLAYBACK_ENVELOPE) {
+            Board::GetInstance().GetDisplay()->SetPlaybackEnvelope(
+                pending_playback_envelope_.load());
         }
 
         if (bits & MAIN_EVENT_TOGGLE_CHAT) {
@@ -551,8 +568,8 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        if (tts_downlink_active_.load()) {
+            audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
         }
     });
 
@@ -568,8 +585,12 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        tts_downlink_active_.store(false);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
+            pending_tts_stop_ = false;
+            audio_service_.ResetDecoder();
+            display->SetPlaybackEnvelope(0);
             remote_recording_active_ = false;
             manual_listening_requested_.store(false);
             display->SetPushToTalkActive(false);
@@ -591,21 +612,22 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
+                audio_service_.ResetDecoder();
+                tts_downlink_active_.store(true);
                 Schedule([this, display]() {
                     aborted_ = false;
                     remote_recording_active_ = false;
+                    pending_tts_stop_ = false;
+                    display->SetPlaybackEnvelope(0);
                     display->SetConversationEvent(ConversationEvent::kTtsStarted);
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this, display]() {
-                    display->SetConversationEvent(ConversationEvent::kTtsStopped);
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                tts_downlink_active_.store(false);
+                Schedule([this]() {
+                    pending_tts_stop_ = true;
+                    if (audio_service_.IsPlaybackIdle()) {
+                        FinishTtsPlayback();
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -619,7 +641,7 @@ void Application::InitializeProtocol() {
                     Schedule([display, message = std::string(text->valuestring),
                               glyphs = std::move(glyphs), bpp]() {
                         display->AddTextGlyphs(glyphs, bpp);
-                        display->SetChatMessage("assistant", message.c_str());
+                        display->SetTranscript(message.c_str());
                     });
                 }
             }
@@ -639,9 +661,15 @@ void Application::InitializeProtocol() {
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
+            auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                Schedule([display, emotion_str = std::string(emotion->valuestring),
+                          message = cJSON_IsString(text) ? std::string(text->valuestring)
+                                                         : std::string()]() {
                     display->SetEmotion(emotion_str.c_str());
+                    if (!message.empty()) {
+                        display->SetTranscript(message.c_str());
+                    }
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -1038,7 +1066,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
@@ -1088,6 +1115,20 @@ void Application::ConfigureWakeWordForListening() {
     // Disable wake word detection in listening mode
     audio_service_.EnableWakeWordDetection(false);
 #endif
+}
+
+void Application::FinishTtsPlayback() {
+    if (!pending_tts_stop_) {
+        return;
+    }
+    pending_tts_stop_ = false;
+    auto display = Board::GetInstance().GetDisplay();
+    display->SetPlaybackEnvelope(0);
+    display->SetConversationEvent(ConversationEvent::kTtsStopped);
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        SetDeviceState(listening_mode_ == kListeningModeManualStop ? kDeviceStateIdle
+                                                                   : kDeviceStateListening);
+    }
 }
 
 void Application::Schedule(std::function<void()>&& callback) {

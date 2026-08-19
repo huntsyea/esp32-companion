@@ -34,6 +34,7 @@
 #define MAIN_EVENT_STOP_LISTENING (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED (1 << 12)
 #define MAIN_EVENT_PLAYBACK_DRAINED (1 << 13)
+#define MAIN_EVENT_PLAYBACK_ENVELOPE (1 << 14)
 
 enum AecMode {
     kAecOff,
@@ -149,6 +150,9 @@ private:
         false;  // Flag to play popup sound after state changes to listening
     bool pending_listening_start_ =
         false;  // Waiting for playback to drain before starting listening (auto mode)
+    bool pending_tts_stop_ = false;
+    std::atomic<uint16_t> pending_playback_envelope_{0};
+    std::atomic<bool> tts_downlink_active_{false};
     std::atomic<bool> manual_listening_requested_{false};
     bool remote_recording_active_ = false;
     int clock_ticks_ = 0;
@@ -168,6 +172,7 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
+    void FinishTtsPlayback();
 
     // Activation task (runs in background)
     void ActivationTask();

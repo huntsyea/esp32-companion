@@ -177,6 +177,14 @@ public:
         Unlock();
     }
 
+    void SetPlaybackEnvelope(uint16_t level_milli) override {
+        if (product_ui_ == nullptr || !Lock(1)) {
+            return;
+        }
+        product_ui_set_playback_envelope(product_ui_, level_milli);
+        Unlock();
+    }
+
     void SetPushToTalkActive(bool active) override {
         if (screen_manager_ == nullptr || !Lock(1)) {
             return;

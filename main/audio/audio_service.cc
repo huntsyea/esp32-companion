@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include "playback_envelope.h"
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
     (esp_ae_rate_cvt_cfg_t) {                                                                \
@@ -187,6 +188,9 @@ void AudioService::Stop() {
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
     }
+    if (callbacks_.on_playback_envelope) {
+        callbacks_.on_playback_envelope(0);
+    }
     if (notify_drained && callbacks_.on_playback_drained) {
         callbacks_.on_playback_drained();
     }
@@ -340,6 +344,10 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
+        if (callbacks_.on_playback_envelope) {
+            callbacks_.on_playback_envelope(
+                CalculatePlaybackEnvelope(task->pcm.data(), task->pcm.size()));
+        }
         codec_->OutputData(task->pcm);
 
         /* Update the last output time */
@@ -359,8 +367,13 @@ void AudioService::AudioOutputTask() {
         audio_queue_cv_.notify_all();
         lock.unlock();
 
-        if (notify_drained && callbacks_.on_playback_drained) {
-            callbacks_.on_playback_drained();
+        if (notify_drained) {
+            if (callbacks_.on_playback_envelope) {
+                callbacks_.on_playback_envelope(0);
+            }
+            if (callbacks_.on_playback_drained) {
+                callbacks_.on_playback_drained();
+            }
         }
     }
 
@@ -444,8 +457,13 @@ void AudioService::OpusCodecTask() {
             const bool notify_drained = MarkPlaybackDrainedLocked();
             audio_queue_cv_.notify_all();
             lock.unlock();
-            if (notify_drained && callbacks_.on_playback_drained) {
-                callbacks_.on_playback_drained();
+            if (notify_drained) {
+                if (callbacks_.on_playback_envelope) {
+                    callbacks_.on_playback_envelope(0);
+                }
+                if (callbacks_.on_playback_drained) {
+                    callbacks_.on_playback_drained();
+                }
             }
             lock.lock();
         }
@@ -770,6 +788,9 @@ void AudioService::ResetDecoder() {
         audio_testing_queue_.clear();
         notify_drained = MarkPlaybackDrainedLocked();
         audio_queue_cv_.notify_all();
+    }
+    if (callbacks_.on_playback_envelope) {
+        callbacks_.on_playback_envelope(0);
     }
     if (notify_drained && callbacks_.on_playback_drained) {
         callbacks_.on_playback_drained();

@@ -86,6 +86,8 @@ struct AudioServiceCallbacks {
     std::function<void(void)> on_audio_testing_queue_full;
     // Fired when the decode/playback queues and their in-flight work are drained.
     std::function<void(void)> on_playback_drained;
+    // Decoded local speaker level, scaled from 0 to 1000.
+    std::function<void(uint16_t)> on_playback_envelope;
 };
 
 enum AudioTaskType {

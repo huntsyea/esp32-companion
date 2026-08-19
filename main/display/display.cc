@@ -34,6 +34,8 @@ void Display::SetConversationEvent(ConversationEvent event) { (void)event; }
 
 void Display::SetTranscript(const char* transcript) { (void)transcript; }
 
+void Display::SetPlaybackEnvelope(uint16_t level_milli) { (void)level_milli; }
+
 void Display::SetPushToTalkActive(bool active) { (void)active; }
 
 void Display::SetEmotion(const char* emotion) { ESP_LOGW(TAG, "SetEmotion: %s", emotion); }
