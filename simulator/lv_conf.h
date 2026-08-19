@@ -2,6 +2,7 @@
 #define LV_CONF_H
 
 #define LV_COLOR_DEPTH 16
+#define LV_MEM_SIZE (512 * 1024U)
 
 #define LV_USE_OS LV_OS_NONE
 
@@ -15,5 +16,7 @@
 #define LV_SDL_MOUSEWHEEL_MODE LV_SDL_MOUSEWHEEL_MODE_ENCODER
 
 #define LV_FONT_MONTSERRAT_14 1
+
+#define LV_USE_SNAPSHOT 1
 
 #endif

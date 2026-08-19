@@ -9,7 +9,7 @@ BUILD_DIR="${REPOSITORY_DIR}/build/companion-simulator-macos"
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}"
 
-if [[ "${1:-}" == "--smoke-test" ]]; then
+if [[ "${1:-}" == "--smoke-test" || "${1:-}" == "--render-reference" ]]; then
     export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
 fi
 
