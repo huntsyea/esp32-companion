@@ -102,6 +102,11 @@ public:
         }
 
         const time_t epoch = time(nullptr);
+        const int64_t epoch_minute = (int64_t)epoch / 60;
+        if (!update_all && has_clock_snapshot_ && epoch_minute == last_clock_minute_ &&
+            time_synchronized_ == last_clock_synchronized_) {
+            return;
+        }
         companion_local_time_t local_time{};
         if (!companion_time_from_epoch((int64_t)epoch, time_synchronized_, &local_time)) {
             local_time.synchronized = false;
@@ -110,6 +115,9 @@ public:
             return;
         }
         clock_screen_update(clock_screen_, &local_time);
+        last_clock_minute_ = epoch_minute;
+        last_clock_synchronized_ = time_synchronized_;
+        has_clock_snapshot_ = true;
         Unlock();
     }
 
@@ -142,6 +150,9 @@ private:
     clock_screen_t* clock_screen_ = nullptr;
     screen_manager_t* screen_manager_ = nullptr;
     bool time_synchronized_ = false;
+    int64_t last_clock_minute_ = 0;
+    bool last_clock_synchronized_ = false;
+    bool has_clock_snapshot_ = false;
 };
 
 class CustomBoard : public WifiBoard {

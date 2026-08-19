@@ -1,8 +1,13 @@
-import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from scripts.tests.companion_test_support import (
+    ensure_simulator,
+    read_ppm,
+    simulator_environment,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,29 +23,6 @@ REFERENCE_CASES = {
 }
 BACKGROUND = (0xED, 0xF5, 0xF9)
 EYES = (0x06, 0x11, 0x16)
-
-
-def simulator_environment():
-    environment = os.environ.copy()
-    environment.setdefault(
-        "LVGL_SOURCE_DIR", str(ROOT / "managed_components" / "lvgl__lvgl")
-    )
-    environment["SDL_VIDEODRIVER"] = "dummy"
-    return environment
-
-
-def read_ppm(path):
-    with path.open("rb") as image:
-        identifier = image.readline().strip()
-        dimensions = image.readline().strip()
-        maximum = image.readline().strip()
-        pixels = image.read()
-
-    if identifier != b"P6" or dimensions != b"240 240" or maximum != b"255":
-        raise AssertionError(f"Unexpected PPM header in {path}")
-    if len(pixels) != 240 * 240 * 3:
-        raise AssertionError(f"Unexpected PPM payload size in {path}")
-    return pixels
 
 
 def pixel_at(pixels, x, y):
@@ -61,17 +43,7 @@ def color_points(pixels, color, tolerance=12):
 class ProductUiStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        completed = subprocess.run(
-            [str(ROOT / "simulator" / "run.sh"), "--smoke-test"],
-            cwd=ROOT,
-            env=simulator_environment(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise AssertionError(f"{completed.stdout}\n{completed.stderr}")
+        ensure_simulator()
 
     def run_simulator(self, *arguments):
         completed = subprocess.run(

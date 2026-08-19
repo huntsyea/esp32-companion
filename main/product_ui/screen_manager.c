@@ -1,10 +1,12 @@
 #include "screen_manager.h"
+#include "view_helpers.h"
 
 #include <stddef.h>
 
 #define SCREEN_MANAGER_TIMER_PERIOD_MS 50U
 
 struct screen_manager {
+    product_ui_t* product_ui;
     lv_obj_t* avatar_root;
     lv_obj_t* clock_root;
     lv_timer_t* timer;
@@ -27,18 +29,10 @@ static bool deadline_reached(uint32_t time_ms, uint32_t deadline_ms) {
     return (int32_t)(time_ms - deadline_ms) >= 0;
 }
 
-static void set_root_visible(lv_obj_t* root, bool visible) {
-    if (visible) {
-        lv_obj_remove_flag(root, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
 static void present(screen_manager_t* manager, screen_manager_screen_t screen) {
     manager->visible_screen = screen;
-    set_root_visible(manager->avatar_root, screen == SCREEN_MANAGER_SCREEN_AVATAR);
-    set_root_visible(manager->clock_root, screen == SCREEN_MANAGER_SCREEN_CLOCK);
+    product_ui_view_set_visible(manager->avatar_root, screen == SCREEN_MANAGER_SCREEN_AVATAR);
+    product_ui_view_set_visible(manager->clock_root, screen == SCREEN_MANAGER_SCREEN_CLOCK);
 }
 
 static void on_timer(lv_timer_t* timer) {
@@ -68,6 +62,7 @@ screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t
         return NULL;
     }
 
+    manager->product_ui = product_ui;
     manager->avatar_root = avatar_root;
     manager->clock_root = clock_root;
     manager->selected_screen = SCREEN_MANAGER_SCREEN_AVATAR;
@@ -140,6 +135,15 @@ void screen_manager_set_conversation_state(screen_manager_t* manager, product_ui
     if (!manager->return_pending) {
         present(manager, manager->selected_screen);
     }
+}
+
+bool screen_manager_dispatch_event(screen_manager_t* manager, product_ui_event_t event) {
+    if (manager == NULL) {
+        return false;
+    }
+    const bool changed = product_ui_dispatch(manager->product_ui, event);
+    screen_manager_set_conversation_state(manager, product_ui_get_state(manager->product_ui));
+    return changed;
 }
 
 void screen_manager_update_time(screen_manager_t* manager, uint32_t time_ms) {

@@ -1,36 +1,18 @@
-import os
 import subprocess
 import unittest
 from pathlib import Path
+
+from scripts.tests.companion_test_support import ensure_simulator, simulator_environment
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SIMULATOR = ROOT / "build" / "companion-simulator-macos" / "companion-simulator"
 
 
-def simulator_environment():
-    environment = os.environ.copy()
-    environment.setdefault(
-        "LVGL_SOURCE_DIR", str(ROOT / "managed_components" / "lvgl__lvgl")
-    )
-    environment["SDL_VIDEODRIVER"] = "dummy"
-    return environment
-
-
 class ScreenManagerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        completed = subprocess.run(
-            [str(ROOT / "simulator" / "run.sh"), "--smoke-test"],
-            cwd=ROOT,
-            env=simulator_environment(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise AssertionError(f"{completed.stdout}\n{completed.stderr}")
+        ensure_simulator()
 
     def trace(self, *actions):
         completed = subprocess.run(

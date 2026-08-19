@@ -344,8 +344,7 @@ static int trace_navigation(screen_manager_t* screen_manager, product_ui_t* prod
                 free(actions);
                 return 2;
             }
-            result = product_ui_dispatch(product_ui, event) ? "changed" : "ignored";
-            screen_manager_set_conversation_state(screen_manager, product_ui_get_state(product_ui));
+            result = screen_manager_dispatch_event(screen_manager, event) ? "changed" : "ignored";
         }
         print_navigation_line(action, result, screen_manager, product_ui, clock_result,
                               animation_result);
@@ -359,37 +358,41 @@ static void apply_key(simulator_controls_t* controls, uint32_t key) {
     switch (key) {
         case 'i':
             if (product_ui_get_state(controls->product_ui) == PRODUCT_UI_STATE_OFFLINE) {
-                product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CONNECTED);
+                screen_manager_dispatch_event(controls->screen_manager, PRODUCT_UI_EVENT_CONNECTED);
             } else {
-                product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CANCELLED);
+                screen_manager_dispatch_event(controls->screen_manager, PRODUCT_UI_EVENT_CANCELLED);
                 screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             }
             break;
         case 'l':
-            if (product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_LISTEN_STARTED)) {
+            if (screen_manager_dispatch_event(controls->screen_manager,
+                                              PRODUCT_UI_EVENT_LISTEN_STARTED)) {
                 screen_manager_set_push_to_talk_active(controls->screen_manager, true);
             }
             break;
         case 't':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_RECORDING_ENDED);
+            screen_manager_dispatch_event(controls->screen_manager,
+                                          PRODUCT_UI_EVENT_RECORDING_ENDED);
             screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 's':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STARTED);
+            screen_manager_dispatch_event(controls->screen_manager, PRODUCT_UI_EVENT_TTS_STARTED);
             break;
         case 'x':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STOPPED);
+            screen_manager_dispatch_event(controls->screen_manager, PRODUCT_UI_EVENT_TTS_STOPPED);
             screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 'o':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_DISCONNECTED);
+            screen_manager_dispatch_event(controls->screen_manager, PRODUCT_UI_EVENT_DISCONNECTED);
             screen_manager_set_push_to_talk_active(controls->screen_manager, false);
             break;
         case 'e':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TEMPORARY_ERROR);
+            screen_manager_dispatch_event(controls->screen_manager,
+                                          PRODUCT_UI_EVENT_TEMPORARY_ERROR);
             break;
         case 'r':
-            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_ERROR_RECOVERED);
+            screen_manager_dispatch_event(controls->screen_manager,
+                                          PRODUCT_UI_EVENT_ERROR_RECOVERED);
             break;
         case '+':
             controls->envelope = controls->envelope >= 900 ? 1000 : controls->envelope + 100;
@@ -408,8 +411,6 @@ static void apply_key(simulator_controls_t* controls, uint32_t key) {
         default:
             return;
     }
-    screen_manager_set_conversation_state(controls->screen_manager,
-                                          product_ui_get_state(controls->product_ui));
     printf("state=%s screen=%s envelope_target=%u\n",
            product_ui_state_name(product_ui_get_state(controls->product_ui)),
            screen_manager_screen_name(screen_manager_get_visible_screen(controls->screen_manager)),

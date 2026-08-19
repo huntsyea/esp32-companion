@@ -1,6 +1,7 @@
 #include "product_ui.h"
 
 #include "product_identity.h"
+#include "view_helpers.h"
 
 #include <stddef.h>
 
@@ -31,54 +32,21 @@ struct product_ui {
 
 static void render(product_ui_t* ui);
 
-static void make_event_transparent(lv_obj_t* object) {
-    lv_obj_add_flag(object, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-}
-
-static void apply_surface_style(lv_obj_t* object, uint32_t color, int32_t radius) {
-    lv_obj_set_style_bg_color(object, lv_color_hex(color), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(object, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(object, 0, LV_PART_MAIN);
-    lv_obj_set_style_outline_width(object, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(object, radius, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(object, 0, LV_PART_MAIN);
-    lv_obj_set_scrollbar_mode(object, LV_SCROLLBAR_MODE_OFF);
-    make_event_transparent(object);
-}
-
-static lv_obj_t* create_shape(lv_obj_t* parent, int32_t x, int32_t y, int32_t width, int32_t height,
-                              uint32_t color, int32_t radius) {
-    lv_obj_t* shape = lv_obj_create(parent);
-    lv_obj_set_pos(shape, x, y);
-    lv_obj_set_size(shape, width, height);
-    apply_surface_style(shape, color, radius);
-    return shape;
-}
-
 static lv_obj_t* create_eye(lv_obj_t* parent, int32_t x, int32_t y, int32_t width, int32_t height) {
-    lv_obj_t* eye = create_shape(parent, x, y, width, height, PRODUCT_IDENTITY_EYE_COLOR,
-                                 PRODUCT_IDENTITY_EYE_RADIUS);
+    lv_obj_t* eye = product_ui_view_create_shape(
+        parent, x, y, width, height, PRODUCT_IDENTITY_EYE_COLOR, PRODUCT_IDENTITY_EYE_RADIUS);
     lv_obj_set_style_transform_pivot_x(eye, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_pivot_y(eye, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_rotation(eye, PRODUCT_IDENTITY_EYE_ROTATION, LV_PART_MAIN);
     return eye;
 }
 
-static void set_visible(lv_obj_t* object, bool visible) {
-    if (visible) {
-        lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
 static void hide_state_marks(product_ui_t* ui) {
     for (size_t index = 0; index < 4; ++index) {
-        set_visible(ui->side_marks[index], false);
+        product_ui_view_set_visible(ui->side_marks[index], false);
     }
     for (size_t index = 0; index < 3; ++index) {
-        set_visible(ui->top_marks[index], false);
+        product_ui_view_set_visible(ui->top_marks[index], false);
     }
 }
 
@@ -139,7 +107,7 @@ static void set_mark(lv_obj_t* mark, int32_t x, int32_t y, int32_t width, int32_
     lv_obj_set_style_transform_pivot_x(mark, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_pivot_y(mark, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_rotation(mark, rotation, LV_PART_MAIN);
-    set_visible(mark, true);
+    product_ui_view_set_visible(mark, true);
 }
 
 static void render_idle(product_ui_t* ui) {
@@ -292,10 +260,21 @@ static void render(product_ui_t* ui) {
 }
 
 static void set_state(product_ui_t* ui, product_ui_state_t state) {
+    const product_ui_state_t previous_state = ui->state;
     ui->state = state;
     ui->envelope_target = 0;
     ui->envelope_smoothed = 0;
     render(ui);
+    if (ui->animation_timer == NULL) {
+        return;
+    }
+    if (state == PRODUCT_UI_STATE_OFFLINE) {
+        lv_timer_pause(ui->animation_timer);
+    } else if (previous_state == PRODUCT_UI_STATE_OFFLINE) {
+        ui->timer_epoch_ms = lv_tick_get();
+        ui->animation_time_ms = 0;
+        lv_timer_resume(ui->animation_timer);
+    }
 }
 
 static void on_animation_timer(lv_timer_t* timer) {
@@ -325,23 +304,23 @@ product_ui_t* product_ui_create(lv_obj_t* parent) {
     ui->root = lv_obj_create(parent);
     lv_obj_set_size(ui->root, LV_PCT(100), LV_PCT(100));
     lv_obj_align(ui->root, LV_ALIGN_CENTER, 0, 0);
-    apply_surface_style(ui->root, PRODUCT_IDENTITY_BACKGROUND_COLOR, 0);
+    product_ui_view_apply_surface_style(ui->root, PRODUCT_IDENTITY_BACKGROUND_COLOR, 0);
 
-    ui->body = create_shape(ui->root, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y,
-                            PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT,
-                            PRODUCT_IDENTITY_BODY_COLOR, LV_RADIUS_CIRCLE);
+    ui->body = product_ui_view_create_shape(
+        ui->root, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y, PRODUCT_IDENTITY_BODY_WIDTH,
+        PRODUCT_IDENTITY_BODY_HEIGHT, PRODUCT_IDENTITY_BODY_COLOR, LV_RADIUS_CIRCLE);
     ui->eyes[0] = create_eye(ui->root, PRODUCT_IDENTITY_LEFT_EYE_X, PRODUCT_IDENTITY_LEFT_EYE_Y,
                              PRODUCT_IDENTITY_LEFT_EYE_WIDTH, PRODUCT_IDENTITY_LEFT_EYE_HEIGHT);
     ui->eyes[1] = create_eye(ui->root, PRODUCT_IDENTITY_RIGHT_EYE_X, PRODUCT_IDENTITY_RIGHT_EYE_Y,
                              PRODUCT_IDENTITY_RIGHT_EYE_WIDTH, PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT);
 
     for (size_t index = 0; index < 4; ++index) {
-        ui->side_marks[index] =
-            create_shape(ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
+        ui->side_marks[index] = product_ui_view_create_shape(
+            ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
     }
     for (size_t index = 0; index < 3; ++index) {
-        ui->top_marks[index] =
-            create_shape(ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
+        ui->top_marks[index] = product_ui_view_create_shape(
+            ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
     }
 
     ui->state = PRODUCT_UI_STATE_OFFLINE;
@@ -354,6 +333,7 @@ product_ui_t* product_ui_create(lv_obj_t* parent) {
         lv_obj_delete(ui->root);
         return NULL;
     }
+    lv_timer_pause(ui->animation_timer);
     return ui;
 }
 

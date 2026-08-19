@@ -47,6 +47,9 @@ void screen_manager_set_push_to_talk_active(screen_manager_t* manager, bool acti
 /** Apply semantic conversation state without exposing LVGL to the caller. */
 void screen_manager_set_conversation_state(screen_manager_t* manager, product_ui_state_t state);
 
+/** Dispatch one semantic event and update Product UI state and screen focus atomically. */
+bool screen_manager_dispatch_event(screen_manager_t* manager, product_ui_event_t event);
+
 /** Advance the deterministic manager clock used for the delayed idle return. */
 void screen_manager_update_time(screen_manager_t* manager, uint32_t time_ms);
 

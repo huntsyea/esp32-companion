@@ -1,9 +1,14 @@
 import calendar
-import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from scripts.tests.companion_test_support import (
+    ensure_simulator,
+    read_ppm,
+    simulator_environment,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,47 +16,14 @@ SIMULATOR = ROOT / "build" / "companion-simulator-macos" / "companion-simulator"
 REFERENCE_DIRECTORY = ROOT / "simulator" / "reference"
 
 
-def simulator_environment():
-    environment = os.environ.copy()
-    environment.setdefault(
-        "LVGL_SOURCE_DIR", str(ROOT / "managed_components" / "lvgl__lvgl")
-    )
-    environment["SDL_VIDEODRIVER"] = "dummy"
-    return environment
-
-
 def utc_epoch(year, month, day, hour, minute):
     return calendar.timegm((year, month, day, hour, minute, 0))
-
-
-def read_ppm(path):
-    with path.open("rb") as image:
-        identifier = image.readline().strip()
-        dimensions = image.readline().strip()
-        maximum = image.readline().strip()
-        pixels = image.read()
-
-    if identifier != b"P6" or dimensions != b"240 240" or maximum != b"255":
-        raise AssertionError(f"Unexpected PPM header in {path}")
-    if len(pixels) != 240 * 240 * 3:
-        raise AssertionError(f"Unexpected PPM payload size in {path}")
-    return pixels
 
 
 class CompanionClockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        completed = subprocess.run(
-            [str(ROOT / "simulator" / "run.sh"), "--smoke-test"],
-            cwd=ROOT,
-            env=simulator_environment(),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if completed.returncode != 0:
-            raise AssertionError(f"{completed.stdout}\n{completed.stderr}")
+        ensure_simulator()
 
     def run_simulator(self, *arguments):
         completed = subprocess.run(
