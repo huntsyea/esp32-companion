@@ -89,12 +89,22 @@ class CompanionValidationTests(unittest.TestCase):
                 "--flash_size 16MB\n0x20000 xiaozhi.bin\n", encoding="utf-8"
             )
 
-            result = ValidationHarness(root).check_firmware_artifact()
+            result = ValidationHarness(root).check_firmware_artifact(
+                source_revision="0123456789abcdef"
+            )
 
             self.assertEqual("PASS", result.status)
             self.assertIn("target=esp32s3", result.detail)
             self.assertIn("board=esp32-s3-touch-lcd-1.54", result.detail)
+            self.assertIn("source=0123456789abcdef", result.detail)
             self.assertIn("sha256=", result.detail)
+
+            unbound = ValidationHarness(root).check_firmware_artifact()
+            self.assertEqual("NOT RUN", unbound.status)
+            self.assertEqual(
+                "fresh firmware build not run; existing artifact is not attested",
+                unbound.detail,
+            )
 
             (build / "project_description.json").write_text(
                 json.dumps(
@@ -109,6 +119,40 @@ class CompanionValidationTests(unittest.TestCase):
             mismatch = ValidationHarness(root).check_firmware_artifact()
             self.assertEqual("FAIL", mismatch.status)
             self.assertEqual("firmware target does not match baseline", mismatch.detail)
+
+    def test_empty_flash_args_records_failure_without_raising(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            root.mkdir()
+            write_baseline(root)
+            build = root / "build"
+            build.mkdir()
+            (build / "xiaozhi.bin").write_bytes(b"firmware")
+            (build / "project_description.json").write_text(
+                json.dumps(
+                    {
+                        "app_bin": "xiaozhi.bin",
+                        "target": "esp32s3",
+                        "git_revision": "v5.5.2",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (build / "xiaozhi-build.sdkconfig.defaults").write_text(
+                "CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54=y\n",
+                encoding="utf-8",
+            )
+            (build / "flash_args").write_text("   \n", encoding="utf-8")
+
+            result = ValidationHarness(root).check_firmware_artifact(
+                source_revision="0123456789abcdef"
+            )
+
+            self.assertEqual("FAIL", result.status)
+            self.assertEqual(
+                "application artifact is absent from canonical flash layout",
+                result.detail,
+            )
 
     @mock.patch("scripts.companion_validation.subprocess.run")
     def test_safe_gates_use_argv_without_a_shell_and_suppress_command_output(self, run):

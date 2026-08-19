@@ -167,7 +167,9 @@ class ValidationHarness:
             ),
         )
 
-    def check_firmware_artifact(self) -> ValidationResult:
+    def check_firmware_artifact(
+        self, source_revision: str | None = None
+    ) -> ValidationResult:
         build = self.root / "build"
         description_path = build / "project_description.json"
         flash_args_path = build / "flash_args"
@@ -237,12 +239,24 @@ class ValidationHarness:
             )
         flash_args = flash_args_path.read_text(encoding="utf-8")
         flash_lines = flash_args.splitlines()
-        if "--flash_size 16MB" not in flash_lines[0] or f"0x20000 {app_name}" not in flash_lines:
+        if (
+            not flash_lines
+            or "--flash_size 16MB" not in flash_lines[0]
+            or f"0x20000 {app_name}" not in flash_lines
+        ):
             return ValidationResult(
                 "firmware-artifact",
                 "Firmware artifact metadata",
                 "FAIL",
                 "application artifact is absent from canonical flash layout",
+            )
+
+        if source_revision is None:
+            return ValidationResult(
+                "firmware-artifact",
+                "Firmware artifact metadata",
+                "NOT RUN",
+                "fresh firmware build not run; existing artifact is not attested",
             )
 
         digest = _sha256(app_path)
@@ -251,7 +265,8 @@ class ValidationHarness:
             "Firmware artifact metadata",
             "PASS",
             (
-                f"target={board['target']}; board={board['variant']}; idf={idf_revision}; "
+                f"source={source_revision}; target={board['target']}; "
+                f"board={board['variant']}; idf={idf_revision}; "
                 f"size={app_path.stat().st_size} bytes; sha256={digest}"
             ),
         )
@@ -400,8 +415,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_simulator = args.all_safe or args.run_simulator
     run_firmware = args.all_safe or args.run_firmware_build
 
+    repository_result = harness.check_repository()
+    firmware_build_result = (
+        harness.run_firmware_build()
+        if run_firmware
+        else harness.not_run("firmware-build", "Canonical firmware build")
+    )
+    source_revision = None
+    if repository_result.status == "PASS" and firmware_build_result.status == "PASS":
+        match = re.fullmatch(r"revision=([0-9a-f]+); clean", repository_result.detail)
+        if match is not None:
+            source_revision = match.group(1)
+
     results = [
-        harness.check_repository(),
+        repository_result,
         harness.check_factory_backup(),
         harness.run_host_tests()
         if run_host
@@ -409,10 +436,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         harness.run_simulator_smoke()
         if run_simulator
         else harness.not_run("simulator", "Strict simulator smoke test"),
-        harness.run_firmware_build()
-        if run_firmware
-        else harness.not_run("firmware-build", "Canonical firmware build"),
-        harness.check_firmware_artifact(),
+        firmware_build_result,
+        harness.check_firmware_artifact(source_revision=source_revision),
     ]
 
     try:

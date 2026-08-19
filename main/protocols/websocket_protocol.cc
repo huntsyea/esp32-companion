@@ -66,9 +66,31 @@ WebsocketProtocol::WebsocketProtocol()
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
-    intentional_close_ = true;
-    ++transport_generation_;
-    ResetTransport();
+    intentional_close_.store(true);
+    std::shared_ptr<SecureWebSocketClient> secure;
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(secure_connection_lifecycle_mutex_);
+        if (websocket_ != nullptr || GetSecureTransport() != nullptr ||
+            connection_task_active_.load()) {
+            ++transport_generation_;
+        }
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT);
+        secure = TakeSecureTransport();
+        if (secure) {
+            secure->DetachCallbacks();
+            secure->Cancel();
+        }
+        websocket_.reset();
+    }
+    if (connection_task_active_.load()) {
+        xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_TASK_DONE_EVENT,
+                            pdTRUE, pdFALSE, portMAX_DELAY);
+        connection_task_active_.store(false);
+    }
+    if (secure && !StartSecureShutdown(secure)) {
+        DeferSecureShutdown(std::move(secure));
+    }
+    RetryDeferredSecureShutdowns();
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -114,7 +136,18 @@ bool WebsocketProtocol::SendText(const std::string& text) {
         return false;
     }
 
-    if (!SendTransport(text.data(), text.size(), false)) {
+    std::string legacy_wire_text;
+    const std::string* wire_text = &text;
+    if (synthesized_legacy_session_) {
+        const std::string local_session = "\"session_id\":\"" + session_id_ + "\"";
+        const auto position = text.find(local_session);
+        if (position != std::string::npos) {
+            legacy_wire_text = text;
+            legacy_wire_text.replace(position, local_session.size(), "\"session_id\":\"\"");
+            wire_text = &legacy_wire_text;
+        }
+    }
+    if (!SendTransport(wire_text->data(), wire_text->size(), false)) {
         ESP_LOGE(TAG, "Failed to send WebSocket text frame");
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
@@ -124,25 +157,42 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 }
 
 bool WebsocketProtocol::IsAudioChannelOpened() const {
-    return IsTransportConnected() && !error_occurred_ && !IsTimeout();
+    return channel_connected_.load() && IsTransportConnected() && !error_occurred_ && !IsTimeout();
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
-    intentional_close_ = true;
-    ++transport_generation_;
-    const bool was_connected = channel_connected_;
-    channel_connected_ = false;
-    session_id_.clear();
-    ResetTransport();
-    intentional_close_ = false;
+    intentional_close_.store(true);
+    bool was_connected = false;
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(secure_connection_lifecycle_mutex_);
+        const bool had_transport = websocket_ != nullptr || GetSecureTransport() != nullptr ||
+                                   IsSecureConnectionTaskActive();
+        if (had_transport) {
+            ++transport_generation_;
+        }
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT);
+        auto secure = TakeSecureTransport();
+        if (secure) {
+            secure->DetachCallbacks();
+            secure->Cancel();
+            if (!StartSecureShutdown(secure)) {
+                ESP_LOGE(TAG, "Failed to start secure WebSocket shutdown task");
+                DeferSecureShutdown(std::move(secure));
+            }
+        }
+        was_connected = channel_connected_.exchange(false);
+        session_id_.clear();
+        synthesized_legacy_session_ = false;
+        ResetTransport();
+    }
+    intentional_close_.store(false);
     if (was_connected && on_audio_channel_closed_ != nullptr) {
         on_audio_channel_closed_();
     }
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
-    const uint32_t transport_generation = ++transport_generation_;
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     std::string token = settings.GetString("token");
@@ -155,11 +205,18 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGW(TAG, "Connection attempt deferred by reconnect policy");
         return false;
     }
+    RetryDeferredSecureShutdowns();
+    if (IsSecureConnectionTaskActive()) {
+        ESP_LOGW(TAG, "A WebSocket connection attempt is already active");
+        return false;
+    }
 
     error_occurred_ = false;
     session_id_.clear();
-    channel_connected_ = false;
-    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+    synthesized_legacy_session_ = false;
+    channel_connected_.store(false);
+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
+                                                  WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT);
 
     const CompanionConnectionConfig companion = LoadCompanionConnectionConfig(url);
     const bool companion_mode = companion.mode != CompanionConnectionMode::kLegacy;
@@ -179,8 +236,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     if (use_secure_transport) {
+        std::lock_guard<std::mutex> lock(secure_transport_mutex_);
         secure_websocket_ =
-            std::make_unique<SecureWebSocketClient>(url, companion.ca_certificate_pem);
+            std::make_shared<SecureWebSocketClient>(url, companion.ca_certificate_pem);
     } else {
         auto network = Board::GetInstance().GetNetwork();
         websocket_ = network->CreateWebSocket(1);
@@ -190,14 +248,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
             return false;
         }
     }
+    const uint32_t transport_generation = ++transport_generation_;
 
     if (!token.empty()) {
         // If token not has a space, add "Bearer " prefix
         if (token.find(" ") == std::string::npos) {
             token = "Bearer " + token;
         }
-        if (secure_websocket_ != nullptr) {
-            secure_websocket_->SetHeader("Authorization", token.c_str());
+        if (auto secure = GetSecureTransport()) {
+            secure->SetHeader("Authorization", token.c_str());
         } else {
             websocket_->SetHeader("Authorization", token.c_str());
         }
@@ -205,10 +264,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
     const std::string protocol_version = std::to_string(version_);
     const std::string device_id = SystemInfo::GetMacAddress();
     const std::string client_id = Board::GetInstance().GetUuid();
-    if (secure_websocket_ != nullptr) {
-        secure_websocket_->SetHeader("Protocol-Version", protocol_version.c_str());
-        secure_websocket_->SetHeader("Device-Id", device_id.c_str());
-        secure_websocket_->SetHeader("Client-Id", client_id.c_str());
+    if (auto secure = GetSecureTransport()) {
+        secure->SetHeader("Protocol-Version", protocol_version.c_str());
+        secure->SetHeader("Device-Id", device_id.c_str());
+        secure->SetHeader("Client-Id", client_id.c_str());
     } else {
         websocket_->SetHeader("Protocol-Version", protocol_version.c_str());
         websocket_->SetHeader("Device-Id", device_id.c_str());
@@ -306,23 +365,23 @@ bool WebsocketProtocol::OpenAudioChannel() {
             return;
         }
         ESP_LOGI(TAG, "Websocket disconnected");
+        xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT);
         session_id_.clear();
-        const bool was_connected = channel_connected_;
-        channel_connected_ = false;
-        if (was_connected && !intentional_close_) {
+        const bool was_connected = channel_connected_.exchange(false);
+        if (was_connected && !intentional_close_.load()) {
             reconnect_.RecordFailure();
         }
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
-        if (!intentional_close_ && on_disconnected_ != nullptr) {
+        if (!intentional_close_.load() && on_disconnected_ != nullptr) {
             on_disconnected_();
         }
     };
 
-    if (secure_websocket_ != nullptr) {
-        secure_websocket_->OnData(on_data);
-        secure_websocket_->OnDisconnected(on_disconnected);
+    if (auto secure = GetSecureTransport()) {
+        secure->OnData(on_data);
+        secure->OnDisconnected(on_disconnected);
     } else {
         websocket_->OnData(on_data);
         websocket_->OnDisconnected(on_disconnected);
@@ -330,8 +389,18 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     ESP_LOGI(TAG, "Connecting with %s WebSocket transport, protocol version %d",
              use_secure_transport ? "verified TLS" : "configured", version_);
-    const bool connected = secure_websocket_ != nullptr ? secure_websocket_->Connect()
-                                                        : websocket_->Connect(url.c_str());
+    if (auto secure = GetSecureTransport()) {
+        if (!StartSecureConnection(secure, transport_generation)) {
+            ESP_LOGE(TAG, "Failed to start secure WebSocket connection task");
+            reconnect_.RecordFailure();
+            ResetTransport();
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+            return false;
+        }
+        return true;
+    }
+
+    const bool connected = websocket_->Connect(url.c_str());
     if (!connected) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", TransportLastError());
         reconnect_.RecordFailure();
@@ -360,7 +429,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
         return false;
     }
 
-    channel_connected_ = true;
+    channel_connected_.store(true);
     reconnect_.RecordSuccess();
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
@@ -372,29 +441,182 @@ bool WebsocketProtocol::OpenAudioChannel() {
     return true;
 }
 
+bool WebsocketProtocol::StartSecureConnection(
+    const std::shared_ptr<SecureWebSocketClient>& transport, uint32_t generation) {
+    struct ConnectionTaskContext {
+        WebsocketProtocol* protocol;
+        std::shared_ptr<SecureWebSocketClient> transport;
+        uint32_t generation;
+    };
+
+    auto context =
+        std::make_unique<ConnectionTaskContext>(ConnectionTaskContext{this, transport, generation});
+    xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_TASK_DONE_EVENT);
+    connection_task_active_.store(true);
+    const BaseType_t created = xTaskCreate(
+        [](void* argument) {
+            std::unique_ptr<ConnectionTaskContext> context(
+                static_cast<ConnectionTaskContext*>(argument));
+            auto* protocol = context->protocol;
+            protocol->FinishSecureConnection(context->transport, context->generation);
+            // Free the task context explicitly. FreeRTOS task deletion does not
+            // unwind the C++ stack or run automatic destructors.
+            context.reset();
+            xEventGroupSetBits(protocol->event_group_handle_,
+                               WEBSOCKET_PROTOCOL_CONNECTION_TASK_DONE_EVENT);
+            vTaskDelete(nullptr);
+        },
+        "secure_ws_connect", 6144, context.get(), 4, nullptr);
+    if (created != pdPASS) {
+        connection_task_active_.store(false);
+        return false;
+    }
+    context.release();
+    return true;
+}
+
+bool WebsocketProtocol::StartSecureShutdown(std::shared_ptr<SecureWebSocketClient>& transport) {
+    auto context = std::make_unique<std::shared_ptr<SecureWebSocketClient>>(std::move(transport));
+    const BaseType_t created = xTaskCreate(
+        [](void* argument) {
+            std::unique_ptr<std::shared_ptr<SecureWebSocketClient>> context(
+                static_cast<std::shared_ptr<SecureWebSocketClient>*>(argument));
+            (*context)->Cancel();
+            context.reset();
+            vTaskDelete(nullptr);
+        },
+        "secure_ws_close", 4096, context.get(), 3, nullptr);
+    if (created != pdPASS) {
+        transport = std::move(*context);
+        return false;
+    }
+    context.release();
+    return true;
+}
+
+void WebsocketProtocol::DeferSecureShutdown(std::shared_ptr<SecureWebSocketClient> transport) {
+    std::lock_guard<std::mutex> lock(secure_transport_mutex_);
+    deferred_secure_shutdowns_.push_back(std::move(transport));
+}
+
+void WebsocketProtocol::RetryDeferredSecureShutdowns() {
+    std::vector<std::shared_ptr<SecureWebSocketClient>> deferred;
+    {
+        std::lock_guard<std::mutex> lock(secure_transport_mutex_);
+        deferred.swap(deferred_secure_shutdowns_);
+    }
+    for (auto& transport : deferred) {
+        if (!StartSecureShutdown(transport)) {
+            DeferSecureShutdown(std::move(transport));
+        }
+    }
+}
+
+bool WebsocketProtocol::IsSecureConnectionTaskActive() {
+    if (!connection_task_active_.load()) {
+        return false;
+    }
+    if (xEventGroupGetBits(event_group_handle_) & WEBSOCKET_PROTOCOL_CONNECTION_TASK_DONE_EVENT) {
+        xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONNECTION_TASK_DONE_EVENT);
+        connection_task_active_.store(false);
+        return false;
+    }
+    return true;
+}
+
+void WebsocketProtocol::FinishSecureConnection(
+    const std::shared_ptr<SecureWebSocketClient>& transport, uint32_t generation) {
+    if (!transport->Connect()) {
+        std::lock_guard<std::mutex> lifecycle_lock(secure_connection_lifecycle_mutex_);
+        if (generation == transport_generation_.load()) {
+            ESP_LOGE(TAG, "Failed to connect to secure websocket server, code=%d",
+                     transport->GetLastError());
+            reconnect_.RecordFailure();
+            ResetTransport();
+            SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        }
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(secure_connection_lifecycle_mutex_);
+        if (generation != transport_generation_.load()) {
+            return;
+        }
+
+        const auto message = GetHelloMessage();
+        if (!transport->Send(message)) {
+            reconnect_.RecordFailure();
+            ResetTransport();
+            SetError(Lang::Strings::SERVER_ERROR);
+            return;
+        }
+    }
+
+    const EventBits_t bits = xEventGroupWaitBits(
+        event_group_handle_,
+        WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT | WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT, pdTRUE,
+        pdFALSE, pdMS_TO_TICKS(10000));
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(secure_connection_lifecycle_mutex_);
+        if (generation != transport_generation_.load()) {
+            return;
+        }
+        if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ||
+            (bits & WEBSOCKET_PROTOCOL_CONNECTION_FAILED_EVENT)) {
+            ESP_LOGE(TAG, "Failed to receive server hello");
+            reconnect_.RecordFailure();
+            ResetTransport();
+            SetError(Lang::Strings::SERVER_TIMEOUT);
+            return;
+        }
+
+        channel_connected_.store(true);
+        reconnect_.RecordSuccess();
+        if (on_audio_channel_opened_ != nullptr) {
+            on_audio_channel_opened_();
+        }
+        if (on_connected_ != nullptr) {
+            on_connected_();
+        }
+    }
+}
+
 bool WebsocketProtocol::IsTransportConnected() const {
-    if (secure_websocket_ != nullptr) {
-        return secure_websocket_->IsConnected();
+    if (auto secure = GetSecureTransport()) {
+        return secure->IsConnected();
     }
     return websocket_ != nullptr && websocket_->IsConnected();
 }
 
 bool WebsocketProtocol::SendTransport(const void* data, size_t length, bool binary) {
-    if (secure_websocket_ != nullptr) {
-        return secure_websocket_->Send(data, length, binary);
+    if (auto secure = GetSecureTransport()) {
+        return secure->Send(data, length, binary);
     }
     return websocket_ != nullptr && websocket_->Send(data, length, binary);
 }
 
 int WebsocketProtocol::TransportLastError() const {
-    if (secure_websocket_ != nullptr) {
-        return secure_websocket_->GetLastError();
+    if (auto secure = GetSecureTransport()) {
+        return secure->GetLastError();
     }
     return websocket_ == nullptr ? ESP_FAIL : websocket_->GetLastError();
 }
 
+std::shared_ptr<SecureWebSocketClient> WebsocketProtocol::GetSecureTransport() const {
+    std::lock_guard<std::mutex> lock(secure_transport_mutex_);
+    return secure_websocket_;
+}
+
+std::shared_ptr<SecureWebSocketClient> WebsocketProtocol::TakeSecureTransport() {
+    std::lock_guard<std::mutex> lock(secure_transport_mutex_);
+    return std::move(secure_websocket_);
+}
+
 void WebsocketProtocol::ResetTransport() {
-    secure_websocket_.reset();
+    {
+        std::lock_guard<std::mutex> lock(secure_transport_mutex_);
+        secure_websocket_.reset();
+    }
     websocket_.reset();
 }
 
@@ -432,31 +654,51 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     }
 
     auto session_id = cJSON_GetObjectItem(root, "session_id");
-    if (!cJSON_IsString(session_id) || session_id->valuestring[0] == '\0') {
+    if (cJSON_IsString(session_id) && session_id->valuestring[0] != '\0') {
+        session_id_ = session_id->valuestring;
+        synthesized_legacy_session_ = false;
+    } else if (strict_session_validation_) {
         ESP_LOGE(TAG, "Server hello is missing its session ID");
         return;
+    } else {
+        // Legacy servers historically omitted session_id. Use a connection-local
+        // identifier so the Application can still reject packets from an older
+        // transport without changing the wire contract.
+        session_id_ = "legacy-" + std::to_string(transport_generation_.load());
+        synthesized_legacy_session_ = true;
     }
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
-    if (!cJSON_IsObject(audio_params)) {
-        ESP_LOGE(TAG, "Server hello is missing audio parameters");
-        return;
-    }
-    auto format = cJSON_GetObjectItem(audio_params, "format");
-    auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
-    auto channels = cJSON_GetObjectItem(audio_params, "channels");
-    auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
-    if (!cJSON_IsString(format) || strcmp(format->valuestring, "opus") != 0 ||
-        !cJSON_IsNumber(sample_rate) || sample_rate->valueint <= 0 || !cJSON_IsNumber(channels) ||
-        channels->valueint != 1 || !cJSON_IsNumber(frame_duration) ||
-        frame_duration->valueint <= 0) {
-        ESP_LOGE(TAG, "Server hello has unsupported audio parameters");
-        return;
+    if (strict_session_validation_) {
+        if (!cJSON_IsObject(audio_params)) {
+            ESP_LOGE(TAG, "Server hello is missing audio parameters");
+            return;
+        }
+        auto format = cJSON_GetObjectItem(audio_params, "format");
+        auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
+        auto channels = cJSON_GetObjectItem(audio_params, "channels");
+        auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
+        if (!cJSON_IsString(format) || strcmp(format->valuestring, "opus") != 0 ||
+            !cJSON_IsNumber(sample_rate) || sample_rate->valueint <= 0 ||
+            !cJSON_IsNumber(channels) || channels->valueint != 1 ||
+            !cJSON_IsNumber(frame_duration) || frame_duration->valueint <= 0) {
+            ESP_LOGE(TAG, "Server hello has unsupported audio parameters");
+            return;
+        }
+        server_sample_rate_ = sample_rate->valueint;
+        server_frame_duration_ = frame_duration->valueint;
+    } else if (cJSON_IsObject(audio_params)) {
+        auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
+        if (cJSON_IsNumber(sample_rate) && sample_rate->valueint > 0) {
+            server_sample_rate_ = sample_rate->valueint;
+        }
+        auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
+        if (cJSON_IsNumber(frame_duration) && frame_duration->valueint > 0) {
+            server_frame_duration_ = frame_duration->valueint;
+        }
     }
 
-    session_id_ = session_id->valuestring;
-    server_sample_rate_ = sample_rate->valueint;
-    server_frame_duration_ = frame_duration->valueint;
-    ESP_LOGI(TAG, "Server hello negotiated an authenticated session");
+    ESP_LOGI(TAG, "Server hello negotiated a %s session",
+             strict_session_validation_ ? "strict" : "legacy-compatible");
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }

@@ -6,10 +6,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -21,8 +23,10 @@ public:
     void SetHeader(const char* key, const char* value);
     void OnData(std::function<void(const char*, size_t, bool)> callback);
     void OnDisconnected(std::function<void()> callback);
+    void DetachCallbacks();
 
     bool Connect();
+    void Cancel();
     bool IsConnected() const;
     bool Send(const std::string& data);
     bool Send(const void* data, size_t length, bool binary);
@@ -45,6 +49,9 @@ private:
     std::function<void(const char*, size_t, bool)> on_data_;
     std::function<void()> on_disconnected_;
     std::vector<char> incoming_message_;
+    mutable std::mutex client_mutex_;
+    std::mutex callback_mutex_;
+    std::atomic<bool> cancelled_{false};
     bool incoming_binary_ = false;
     bool disconnected_notified_ = false;
     int last_error_ = 0;

@@ -40,6 +40,7 @@
 #define MAIN_EVENT_PLAYBACK_DRAINED (1 << 13)
 #define MAIN_EVENT_PLAYBACK_ENVELOPE (1 << 14)
 #define MAIN_EVENT_CAPTURE_DRAINED (1 << 15)
+#define MAIN_EVENT_INCOMING_AUDIO (1 << 16)
 
 enum AecMode {
     kAecOff,
@@ -142,11 +143,26 @@ public:
     void ResetProtocol();
 
 private:
+    enum class PendingAudioChannelAction {
+        kNone,
+        kListening,
+        kWakeWord,
+    };
+
+    struct PendingTtsPacket {
+        std::string session_id;
+        uint32_t epoch;
+        std::unique_ptr<AudioStreamPacket> packet;
+    };
+
+    static constexpr size_t kMaxPendingTtsPackets = 8;
+
     Application();
     ~Application();
 
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
+    std::deque<PendingTtsPacket> pending_tts_packets_;
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
@@ -169,10 +185,14 @@ private:
     CaptureDrainGate capture_stop_;
     uint32_t pending_tts_stop_epoch_ = 0;
     std::atomic<uint16_t> pending_playback_envelope_{0};
+    std::atomic<uint32_t> pending_tts_start_epoch_{0};
     AudioDownlinkGate tts_downlink_;
     std::atomic<bool> manual_listening_requested_{false};
     bool remote_recording_active_ = false;
     ConversationSession conversation_session_;
+    PendingAudioChannelAction pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+    ListeningMode pending_listening_mode_ = kListeningModeAutoStop;
+    std::string pending_wake_word_;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -186,8 +206,14 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void ContinueOpenAudioChannel(ListeningMode mode);
+    void HandleAudioChannelOpened();
+    void CompletePendingAudioChannelAction();
+    void DrainPendingTtsPackets();
+    void ClearPendingTtsPackets();
+    bool HasPendingTtsPackets(uint32_t epoch);
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void FinishWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
     void FinishTtsPlayback();

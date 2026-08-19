@@ -182,7 +182,7 @@ void Application::Run() {
         MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
         MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
         MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED | MAIN_EVENT_PLAYBACK_ENVELOPE |
-        MAIN_EVENT_CAPTURE_DRAINED;
+        MAIN_EVENT_CAPTURE_DRAINED | MAIN_EVENT_INCOMING_AUDIO;
 
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
@@ -276,6 +276,10 @@ void Application::Run() {
             for (auto& task : tasks) {
                 task();
             }
+        }
+
+        if (bits & MAIN_EVENT_INCOMING_AUDIO) {
+            DrainPendingTtsPackets();
         }
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
@@ -531,7 +535,6 @@ void Application::CheckNewVersion() {
 void Application::InitializeProtocol() {
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
-    auto codec = board.GetAudioCodec();
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
@@ -555,8 +558,21 @@ void Application::InitializeProtocol() {
 
     protocol_->OnDisconnected([this]() {
         Schedule([this]() {
-            remote_recording_active_ = false;
-            manual_listening_requested_.store(false);
+            const auto state = GetDeviceState();
+            const bool interrupted = ShouldCloseConversationOnNetworkLoss(
+                state == kDeviceStateConnecting, state == kDeviceStateListening,
+                state == kDeviceStateSpeaking, conversation_session_.IsActive());
+            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                protocol_->CloseAudioChannel(false);
+            }
+            if (interrupted) {
+                RecoverConversation(ConversationFailure::kTransport, false);
+            } else {
+                remote_recording_active_ = false;
+                manual_listening_requested_.store(false);
+                pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+                pending_wake_word_.clear();
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->SetPushToTalkActive(false);
             display->SetConversationEvent(ConversationEvent::kDisconnected);
@@ -564,35 +580,42 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
-        last_error_message_ = message;
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
+        Schedule([this, message]() {
+            last_error_message_ = message;
+            xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
+        });
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (tts_downlink_.Accept(conversation_session_.Matches(packet->session_id))) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
+        std::lock_guard<std::mutex> lock(mutex_);
+        uint32_t epoch = 0;
+        const std::string session_id = packet->session_id;
+        if (!conversation_session_.Capture(session_id, epoch) || !tts_downlink_.Accept(true)) {
+            return;
         }
+        if (pending_tts_packets_.size() >= kMaxPendingTtsPackets) {
+            pending_tts_packets_.pop_front();
+        }
+        pending_tts_packets_.push_back(PendingTtsPacket{session_id, epoch, std::move(packet)});
+        xEventGroupSetBits(event_group_, MAIN_EVENT_INCOMING_AUDIO);
     });
 
-    protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        conversation_session_.Open(protocol_->session_id());
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
-            ESP_LOGW(TAG,
-                     "Server sample rate %d does not match device output sample rate %d, "
-                     "resampling may cause distortion",
-                     protocol_->server_sample_rate(), codec->output_sample_rate());
-        }
-    });
+    protocol_->OnAudioChannelOpened(
+        [this]() { Schedule([this]() { HandleAudioChannelOpened(); }); });
 
-    protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        const bool interrupted_conversation = conversation_session_.IsActive();
-        conversation_session_.Close();
-        tts_downlink_.Stop();
-        if (interrupted_conversation) {
-            Schedule([this]() { RecoverConversation(ConversationFailure::kTransport, false); });
-        }
+    protocol_->OnAudioChannelClosed([this]() {
+        Schedule([this]() {
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+            const bool interrupted_conversation = conversation_session_.IsActive();
+            conversation_session_.Close();
+            tts_downlink_.Stop();
+            ClearPendingTtsPackets();
+            pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+            pending_wake_word_.clear();
+            if (interrupted_conversation) {
+                RecoverConversation(ConversationFailure::kTransport, false);
+            }
+        });
     });
 
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
@@ -620,12 +643,17 @@ void Application::InitializeProtocol() {
             if (strcmp(state->valuestring, "start") == 0) {
                 // Open the downlink gate before scheduling UI work. The first
                 // binary packet may follow the start frame immediately.
-                audio_service_.ResetDecoder();
                 tts_downlink_.Start();
+                pending_tts_start_epoch_.store(epoch);
                 Schedule([this, display, session_id, epoch]() {
                     if (!conversation_session_.Matches(session_id, epoch)) {
+                        if (pending_tts_start_epoch_.load() == epoch) {
+                            pending_tts_start_epoch_.store(0);
+                        }
                         return;
                     }
+                    audio_service_.ResetDecoder();
+                    pending_tts_start_epoch_.store(0);
                     remote_recording_active_ = false;
                     pending_tts_stop_ = false;
                     display->SetPlaybackEnvelope(0);
@@ -640,7 +668,8 @@ void Application::InitializeProtocol() {
                     }
                     pending_tts_stop_ = true;
                     pending_tts_stop_epoch_ = epoch;
-                    if (audio_service_.IsPlaybackIdle()) {
+                    if (audio_service_.IsPlaybackIdle() && !HasPendingTtsPackets(epoch) &&
+                        pending_tts_start_epoch_.load() != epoch) {
                         FinishTtsPlayback();
                     }
                 });
@@ -882,7 +911,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
+        pending_audio_channel_action_ = PendingAudioChannelAction::kListening;
+        pending_listening_mode_ = mode;
         if (!protocol_->OpenAudioChannel()) {
+            pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error)
             auto display = Board::GetInstance().GetDisplay();
@@ -892,6 +924,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
             SetDeviceState(kDeviceStateIdle);
             return;
         }
+        // Physical WSS completes on its transport task. The opened callback
+        // resumes the pending action on the Application task.
+        return;
     }
 
     if (mode == kListeningModeManualStop && !manual_listening_requested_.load()) {
@@ -955,6 +990,11 @@ void Application::HandleStopListeningEvent() {
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
     } else if (state == kDeviceStateConnecting) {
+        pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+        pending_wake_word_.clear();
+        if (protocol_) {
+            protocol_->CloseAudioChannel(false);
+        }
         remote_recording_active_ = false;
         Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
         SetDeviceState(kDeviceStateIdle);
@@ -1027,13 +1067,27 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
+        pending_audio_channel_action_ = PendingAudioChannelAction::kWakeWord;
+        pending_wake_word_ = wake_word;
         if (!protocol_->OpenAudioChannel()) {
+            pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+            pending_wake_word_.clear();
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error), and
             // wake word detection is re-enabled by the idle state handler.
             SetDeviceState(kDeviceStateIdle);
             return;
         }
+        return;
+    }
+
+    FinishWakeWordInvoke(wake_word);
+}
+
+void Application::FinishWakeWordInvoke(const std::string& wake_word) {
+    if (GetDeviceState() != kDeviceStateConnecting || !protocol_ ||
+        !protocol_->IsAudioChannelOpened()) {
+        return;
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
@@ -1051,6 +1105,91 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     play_popup_on_listening_ = true;
     SetListeningMode(GetDefaultListeningMode());
 #endif
+}
+
+void Application::HandleAudioChannelOpened() {
+    if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
+        return;
+    }
+
+    conversation_session_.Open(protocol_->session_id());
+    auto& board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+    if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
+        ESP_LOGW(TAG,
+                 "Server sample rate %d does not match device output sample rate %d, "
+                 "resampling may cause distortion",
+                 protocol_->server_sample_rate(), codec->output_sample_rate());
+    }
+    CompletePendingAudioChannelAction();
+}
+
+void Application::CompletePendingAudioChannelAction() {
+    if (GetDeviceState() != kDeviceStateConnecting) {
+        pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+        pending_wake_word_.clear();
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel(false);
+        }
+        return;
+    }
+
+    const auto action = pending_audio_channel_action_;
+    pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+    if (action == PendingAudioChannelAction::kListening) {
+        if (pending_listening_mode_ == kListeningModeManualStop &&
+            !manual_listening_requested_.load()) {
+            SetDeviceState(kDeviceStateIdle);
+            return;
+        }
+        SetListeningMode(pending_listening_mode_);
+    } else if (action == PendingAudioChannelAction::kWakeWord) {
+        auto wake_word = std::move(pending_wake_word_);
+        pending_wake_word_.clear();
+        FinishWakeWordInvoke(wake_word);
+    }
+}
+
+void Application::DrainPendingTtsPackets() {
+    std::deque<PendingTtsPacket> packets;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        packets = std::move(pending_tts_packets_);
+    }
+    bool retry_after_start = false;
+    for (auto& pending : packets) {
+        if (pending_tts_start_epoch_.load() == pending.epoch) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pending_tts_packets_.size() < kMaxPendingTtsPackets) {
+                pending_tts_packets_.push_back(std::move(pending));
+            }
+            retry_after_start = true;
+            continue;
+        }
+        if (conversation_session_.Matches(pending.session_id, pending.epoch)) {
+            audio_service_.PushPacketToDecodeQueue(std::move(pending.packet), false);
+        }
+    }
+    if (retry_after_start) {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_INCOMING_AUDIO);
+    }
+}
+
+void Application::ClearPendingTtsPackets() {
+    pending_tts_start_epoch_.store(0);
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_tts_packets_.clear();
+}
+
+bool Application::HasPendingTtsPackets(uint32_t epoch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& pending : pending_tts_packets_) {
+        if (pending.epoch == epoch) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Application::HandleStateChangedEvent() {
@@ -1219,8 +1358,12 @@ void Application::EndConversation(AbortReason reason, ConversationFailure failur
     capture_stop_.Cancel();
     pending_tts_stop_ = false;
     tts_downlink_.Stop();
+    pending_tts_start_epoch_.store(0);
+    ClearPendingTtsPackets();
     remote_recording_active_ = false;
     manual_listening_requested_.store(false);
+    pending_audio_channel_action_ = PendingAudioChannelAction::kNone;
+    pending_wake_word_.clear();
 
     auto display = Board::GetInstance().GetDisplay();
     display->SetPushToTalkActive(false);

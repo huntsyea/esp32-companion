@@ -21,7 +21,9 @@
 
 #include <esp_timer.h>
 #include <time.h>
+#include <array>
 #include <atomic>
+#include <mutex>
 
 #include "assets/lang_config.h"
 #include "power_save_timer.h"
@@ -93,6 +95,7 @@ public:
                 ESP_LOGE(TAG, "Failed to create Screen Manager");
             } else {
                 lv_obj_add_event_cb(lv_screen_active(), OnGesture, LV_EVENT_GESTURE, this);
+                FlushPendingUiEventsLocked();
             }
         }
     }
@@ -105,8 +108,10 @@ public:
 
         const time_t epoch = time(nullptr);
         const int64_t epoch_minute = (int64_t)epoch / 60;
-        if (!update_all && has_clock_snapshot_ && epoch_minute == last_clock_minute_ &&
-            time_synchronized_ == last_clock_synchronized_) {
+        const bool clock_changed =
+            update_all || !has_clock_snapshot_ || epoch_minute != last_clock_minute_ ||
+            time_synchronized_ != last_clock_synchronized_;
+        if (!clock_changed && !HasPendingUiEvents()) {
             return;
         }
         companion_local_time_t local_time{};
@@ -116,10 +121,13 @@ public:
         if (!Lock(1)) {
             return;
         }
-        clock_screen_update(clock_screen_, &local_time);
-        last_clock_minute_ = epoch_minute;
-        last_clock_synchronized_ = time_synchronized_;
-        has_clock_snapshot_ = true;
+        if (clock_changed) {
+            clock_screen_update(clock_screen_, &local_time);
+            last_clock_minute_ = epoch_minute;
+            last_clock_synchronized_ = time_synchronized_;
+            has_clock_snapshot_ = true;
+        }
+        FlushPendingUiEventsLocked();
         Unlock();
     }
 
@@ -129,9 +137,6 @@ public:
     }
 
     void SetConversationEvent(ConversationEvent event) override {
-        if (screen_manager_ == nullptr || !Lock(1)) {
-            return;
-        }
         product_ui_event_t product_event = PRODUCT_UI_EVENT_DISCONNECTED;
         switch (event) {
             case ConversationEvent::kConnected:
@@ -162,11 +167,10 @@ public:
                 product_event = PRODUCT_UI_EVENT_ERROR_RECOVERED;
                 break;
             default:
-                Unlock();
                 return;
         }
-        screen_manager_dispatch_event(screen_manager_, product_event);
-        Unlock();
+        QueueConversationEvent(product_event);
+        FlushPendingUiEvents();
     }
 
     void SetTranscript(const char* transcript) override {
@@ -186,14 +190,106 @@ public:
     }
 
     void SetPushToTalkActive(bool active) override {
-        if (screen_manager_ == nullptr || !Lock(1)) {
-            return;
-        }
-        screen_manager_set_push_to_talk_active(screen_manager_, active);
-        Unlock();
+        QueuePushToTalkEvent(active);
+        FlushPendingUiEvents();
     }
 
 private:
+    static constexpr size_t kPendingConversationEventCapacity = 12;
+
+    bool HasPendingUiEvents() {
+        std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
+        return pending_conversation_event_count_ > 0 || has_pending_push_to_talk_state_;
+    }
+
+    void QueueConversationEvent(product_ui_event_t event) {
+        std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
+        if (pending_conversation_event_count_ < pending_conversation_events_.size()) {
+            pending_conversation_events_[pending_conversation_event_count_++] = event;
+            return;
+        }
+
+        ReconcilePendingConversationEvents(event);
+        ESP_LOGW(TAG, "UI event queue full; reconciling latest conversation state");
+    }
+
+    void QueuePushToTalkEvent(bool active) {
+        std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
+        pending_push_to_talk_state_ = active;
+        has_pending_push_to_talk_state_ = true;
+    }
+
+    void FlushPendingUiEvents() {
+        if (screen_manager_ == nullptr || !Lock(1)) {
+            return;
+        }
+        FlushPendingUiEventsLocked();
+        Unlock();
+    }
+
+    void FlushPendingUiEventsLocked() {
+        if (screen_manager_ == nullptr) {
+            return;
+        }
+
+        std::array<product_ui_event_t, kPendingConversationEventCapacity> events{};
+        size_t event_count = 0;
+        bool has_push_to_talk_state = false;
+        bool push_to_talk_state = false;
+        {
+            std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
+            events = pending_conversation_events_;
+            event_count = pending_conversation_event_count_;
+            pending_conversation_event_count_ = 0;
+            has_push_to_talk_state = has_pending_push_to_talk_state_;
+            has_pending_push_to_talk_state_ = false;
+            push_to_talk_state = pending_push_to_talk_state_;
+        }
+
+        for (size_t index = 0; index < event_count; ++index) {
+            screen_manager_dispatch_event(screen_manager_, events[index]);
+        }
+        if (has_push_to_talk_state) {
+            screen_manager_set_push_to_talk_active(screen_manager_, push_to_talk_state);
+        }
+    }
+
+    void AppendPendingConversationEvent(product_ui_event_t event) {
+        pending_conversation_events_[pending_conversation_event_count_++] = event;
+    }
+
+    void ReconcilePendingConversationEvents(product_ui_event_t latest_event) {
+        pending_conversation_event_count_ = 0;
+        AppendPendingConversationEvent(PRODUCT_UI_EVENT_DISCONNECTED);
+
+        if (latest_event == PRODUCT_UI_EVENT_DISCONNECTED ||
+            latest_event == PRODUCT_UI_EVENT_ERROR_RECOVERED) {
+            return;
+        }
+        if (latest_event == PRODUCT_UI_EVENT_TEMPORARY_ERROR) {
+            AppendPendingConversationEvent(latest_event);
+            return;
+        }
+
+        AppendPendingConversationEvent(PRODUCT_UI_EVENT_CONNECTED);
+        switch (latest_event) {
+            case PRODUCT_UI_EVENT_LISTEN_STARTED:
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_LISTEN_STARTED);
+                return;
+            case PRODUCT_UI_EVENT_RECORDING_ENDED:
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_LISTEN_STARTED);
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_RECORDING_ENDED);
+                return;
+            case PRODUCT_UI_EVENT_TTS_STARTED:
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_LISTEN_STARTED);
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_RECORDING_ENDED);
+                AppendPendingConversationEvent(PRODUCT_UI_EVENT_TTS_STARTED);
+                return;
+            default:
+                return;
+        }
+    }
+
     static void OnGesture(lv_event_t* event) {
         auto* display = static_cast<CompanionDisplay*>(lv_event_get_user_data(event));
         lv_indev_t* input = lv_event_get_indev(event);
@@ -220,6 +316,12 @@ private:
     int64_t last_clock_minute_ = 0;
     bool last_clock_synchronized_ = false;
     bool has_clock_snapshot_ = false;
+    std::mutex pending_ui_events_mutex_;
+    std::array<product_ui_event_t, kPendingConversationEventCapacity>
+        pending_conversation_events_{};
+    size_t pending_conversation_event_count_ = 0;
+    bool has_pending_push_to_talk_state_ = false;
+    bool pending_push_to_talk_state_ = false;
 };
 
 class CustomBoard : public WifiBoard {
@@ -280,6 +382,8 @@ private:
         if (push_to_talk_timer_ != nullptr && esp_timer_is_active(push_to_talk_timer_)) {
             esp_timer_stop(push_to_talk_timer_);
         }
+        // StopListening clears the atomic request before a blocked connection can advance.
+        Application::GetInstance().StopListening();
         Application::GetInstance().Schedule([this]() { EndPushToTalk(); });
     }
 
