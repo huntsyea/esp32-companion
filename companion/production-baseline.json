@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "xiaozhi": {
+    "repository": "https://github.com/78/xiaozhi-esp32.git",
+    "revision": "8e2899dbc9249d9961b6dafc0c59f7bd7e72644d"
+  },
+  "board": {
+    "directory": "waveshare/esp32-s3-touch-lcd-1.54",
+    "variant": "esp32-s3-touch-lcd-1.54",
+    "target": "esp32s3",
+    "display_width": 240,
+    "display_height": 240
+  },
+  "toolchain": {
+    "preferred_esp_idf": "v6.0.2",
+    "minimum_esp_idf": "v5.5.2"
+  },
+  "factory_backup": {
+    "filename": "flash-full-16mb-20260818.bin",
+    "size_bytes": 16777216,
+    "sha256": "368365e59f93eaf18c71e1df8a5d5378cd83e7301ae12ab2cc8653e5dc5a6093"
+  }
+}

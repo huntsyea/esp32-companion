@@ -47,3 +47,10 @@ idf.py build
 idf.py build flash monitor
 ```
 
+## Companion Device baseline
+
+This board is the pinned production target for the Companion Device. See
+[`docs/companion-baseline.md`](../../../../docs/companion-baseline.md) for the
+shared macOS simulator, device build, hardware diagnostics, and factory recovery
+procedure. Do not flash hardware until the external factory backup checksum has
+been verified and the flash has been approved.

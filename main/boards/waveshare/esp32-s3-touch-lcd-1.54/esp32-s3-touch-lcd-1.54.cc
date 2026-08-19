@@ -6,6 +6,7 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
+#include "product_ui.h"
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -49,7 +50,27 @@ public:
     }
 };
 
+class CompanionDisplay : public SpiLcdDisplay {
+public:
+    using SpiLcdDisplay::SpiLcdDisplay;
 
+    void SetupUI() override {
+        if (IsSetupUICalled()) {
+            SpiLcdDisplay::SetupUI();
+            return;
+        }
+
+        SpiLcdDisplay::SetupUI();
+        DisplayLockGuard lock(this);
+        product_ui_root_ = product_ui_create(lv_screen_active());
+        if (product_ui_root_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create Product UI");
+        }
+    }
+
+private:
+    lv_obj_t* product_ui_root_ = nullptr;
+};
 
 class CustomBoard : public WifiBoard {
 private:
@@ -189,10 +210,9 @@ private:
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
         esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 
-        
-        display_ = new SpiLcdDisplay(panel_io, panel,
-                                    DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY
-                                    );
+        display_ = new CompanionDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                        DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X,
+                                        DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
     void InitializeButtons() {
