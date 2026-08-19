@@ -2,24 +2,27 @@
 
 #include "lvgl.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define DISPLAY_WIDTH 240
 #define DISPLAY_HEIGHT 240
 #define WINDOW_ZOOM 2.0F
 
-static bool is_smoke_test(int argc, char** argv) {
-    return argc == 2 && strcmp(argv[1], "--smoke-test") == 0;
-}
+typedef struct {
+    product_ui_t* product_ui;
+    uint16_t envelope;
+} simulator_controls_t;
 
-static const char* get_reference_path(int argc, char** argv) {
-    if (argc == 3 && strcmp(argv[1], "--render-reference") == 0) {
-        return argv[2];
-    }
-    return NULL;
+static void print_usage(const char* program) {
+    fprintf(stderr,
+            "Usage: %s [--smoke-test | --render-reference PATH | "
+            "--render-state STATE TIME_MS ENVELOPE PATH | --trace-events EVENTS]\n",
+            program);
 }
 
 static bool is_interaction_transparent(lv_obj_t* object) {
@@ -37,9 +40,9 @@ static bool is_interaction_transparent(lv_obj_t* object) {
     return true;
 }
 
-static int write_reference_image(lv_obj_t* product_ui, const char* path) {
-    lv_draw_buf_t* snapshot = lv_snapshot_create_draw_buf(product_ui, LV_COLOR_FORMAT_RGB888);
-    if (snapshot != NULL && lv_snapshot_take_to_draw_buf(product_ui, LV_COLOR_FORMAT_RGB888,
+static int write_reference_image(lv_obj_t* product_ui_root, const char* path) {
+    lv_draw_buf_t* snapshot = lv_snapshot_create_draw_buf(product_ui_root, LV_COLOR_FORMAT_RGB888);
+    if (snapshot != NULL && lv_snapshot_take_to_draw_buf(product_ui_root, LV_COLOR_FORMAT_RGB888,
                                                          snapshot) != LV_RESULT_OK) {
         fputs("LVGL rejected the Product UI snapshot buffer.\n", stderr);
         lv_draw_buf_destroy(snapshot);
@@ -87,11 +90,189 @@ static int write_reference_image(lv_obj_t* product_ui, const char* path) {
     return 0;
 }
 
+static bool parse_unsigned(const char* text, uint32_t maximum, uint32_t* value) {
+    if (text == NULL || *text == '\0' || *text == '-') {
+        return false;
+    }
+    errno = 0;
+    char* end = NULL;
+    const unsigned long parsed = strtoul(text, &end, 10);
+    if (errno != 0 || *end != '\0' || parsed > maximum) {
+        return false;
+    }
+    *value = (uint32_t)parsed;
+    return true;
+}
+
+static bool dispatch_state_path(product_ui_t* ui, const char* state_name) {
+    if (strcmp(state_name, "offline") == 0) {
+        return true;
+    }
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_CONNECTED);
+    if (strcmp(state_name, "idle") == 0) {
+        return true;
+    }
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_LISTEN_STARTED);
+    if (strcmp(state_name, "listening") == 0) {
+        return true;
+    }
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_RECORDING_ENDED);
+    if (strcmp(state_name, "thinking") == 0) {
+        return true;
+    }
+    if (strcmp(state_name, "error") == 0) {
+        product_ui_dispatch(ui, PRODUCT_UI_EVENT_TEMPORARY_ERROR);
+        return true;
+    }
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_TTS_STARTED);
+    return strcmp(state_name, "speaking") == 0;
+}
+
+static bool parse_event(const char* name, product_ui_event_t* event) {
+    static const struct {
+        const char* name;
+        product_ui_event_t event;
+    } events[] = {
+        {"connected", PRODUCT_UI_EVENT_CONNECTED},
+        {"listen", PRODUCT_UI_EVENT_LISTEN_STARTED},
+        {"recording_end", PRODUCT_UI_EVENT_RECORDING_ENDED},
+        {"tts_start", PRODUCT_UI_EVENT_TTS_STARTED},
+        {"tts_stop", PRODUCT_UI_EVENT_TTS_STOPPED},
+        {"cancel", PRODUCT_UI_EVENT_CANCELLED},
+        {"disconnected", PRODUCT_UI_EVENT_DISCONNECTED},
+        {"error", PRODUCT_UI_EVENT_TEMPORARY_ERROR},
+        {"recover", PRODUCT_UI_EVENT_ERROR_RECOVERED},
+    };
+    for (size_t index = 0; index < sizeof(events) / sizeof(events[0]); ++index) {
+        if (strcmp(name, events[index].name) == 0) {
+            *event = events[index].event;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void print_trace_line(const char* action, const char* result, product_ui_t* ui) {
+    printf("action=%s result=%s state=%s envelope=%u\n", action, result,
+           product_ui_state_name(product_ui_get_state(ui)),
+           (unsigned)product_ui_get_smoothed_envelope(ui));
+}
+
+static int trace_events(product_ui_t* ui, const char* event_list) {
+    char* events = malloc(strlen(event_list) + 1U);
+    if (events == NULL) {
+        fputs("Failed to allocate the event trace.\n", stderr);
+        return 1;
+    }
+    strcpy(events, event_list);
+    print_trace_line("initial", "initial", ui);
+
+    char* save_pointer = NULL;
+    for (char* token = strtok_r(events, ",", &save_pointer); token != NULL;
+         token = strtok_r(NULL, ",", &save_pointer)) {
+        uint32_t value = 0;
+        if (strncmp(token, "level=", 6) == 0) {
+            if (!parse_unsigned(token + 6, 1000, &value)) {
+                fprintf(stderr, "Invalid playback level: %s\n", token + 6);
+                free(events);
+                return 2;
+            }
+            product_ui_set_playback_envelope(ui, (uint16_t)value);
+            print_trace_line(token, "applied", ui);
+            continue;
+        }
+        if (strncmp(token, "time=", 5) == 0) {
+            if (!parse_unsigned(token + 5, UINT32_MAX, &value)) {
+                fprintf(stderr, "Invalid animation time: %s\n", token + 5);
+                free(events);
+                return 2;
+            }
+            product_ui_set_animation_time(ui, value);
+            print_trace_line(token, "applied", ui);
+            continue;
+        }
+
+        product_ui_event_t event;
+        if (!parse_event(token, &event)) {
+            fprintf(stderr, "Unknown Product UI event: %s\n", token);
+            free(events);
+            return 2;
+        }
+        const bool changed = product_ui_dispatch(ui, event);
+        print_trace_line(token, changed ? "changed" : "ignored", ui);
+    }
+    free(events);
+    return 0;
+}
+
+static void apply_key(simulator_controls_t* controls, uint32_t key) {
+    switch (key) {
+        case 'i':
+            if (product_ui_get_state(controls->product_ui) == PRODUCT_UI_STATE_OFFLINE) {
+                product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CONNECTED);
+            } else {
+                product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_CANCELLED);
+            }
+            break;
+        case 'l':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_LISTEN_STARTED);
+            break;
+        case 't':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_RECORDING_ENDED);
+            break;
+        case 's':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STARTED);
+            break;
+        case 'x':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TTS_STOPPED);
+            break;
+        case 'o':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_DISCONNECTED);
+            break;
+        case 'e':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_TEMPORARY_ERROR);
+            break;
+        case 'r':
+            product_ui_dispatch(controls->product_ui, PRODUCT_UI_EVENT_ERROR_RECOVERED);
+            break;
+        case '+':
+            controls->envelope = controls->envelope >= 900 ? 1000 : controls->envelope + 100;
+            product_ui_set_playback_envelope(controls->product_ui, controls->envelope);
+            break;
+        case '-':
+            controls->envelope = controls->envelope <= 100 ? 0 : controls->envelope - 100;
+            product_ui_set_playback_envelope(controls->product_ui, controls->envelope);
+            break;
+        default:
+            return;
+    }
+    printf("state=%s envelope_target=%u\n",
+           product_ui_state_name(product_ui_get_state(controls->product_ui)),
+           (unsigned)controls->envelope);
+}
+
+static void on_key(lv_event_t* event) {
+    simulator_controls_t* controls = lv_event_get_user_data(event);
+    apply_key(controls, lv_event_get_key(event));
+}
+
 int main(int argc, char** argv) {
-    const bool smoke_test = is_smoke_test(argc, argv);
-    const char* reference_path = get_reference_path(argc, argv);
-    if (argc > 1 && !smoke_test && reference_path == NULL) {
-        fprintf(stderr, "Usage: %s [--smoke-test | --render-reference PATH]\n", argv[0]);
+    const bool smoke_test = argc == 2 && strcmp(argv[1], "--smoke-test") == 0;
+    const bool legacy_reference = argc == 3 && strcmp(argv[1], "--render-reference") == 0;
+    const bool render_state = argc == 6 && strcmp(argv[1], "--render-state") == 0;
+    const bool event_trace = argc == 3 && strcmp(argv[1], "--trace-events") == 0;
+    const bool interactive = argc == 1;
+    if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace) {
+        print_usage(argv[0]);
+        return 2;
+    }
+
+    uint32_t reference_time = 0;
+    uint32_t reference_envelope = 0;
+    if (render_state && (!parse_unsigned(argv[3], UINT32_MAX, &reference_time) ||
+                         !parse_unsigned(argv[4], 1000, &reference_envelope))) {
+        fputs("TIME_MS must be a nonnegative 32-bit integer and ENVELOPE must be 0..1000.\n",
+              stderr);
         return 2;
     }
 
@@ -118,27 +299,63 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    lv_obj_t* product_ui = product_ui_create(lv_screen_active());
-    if (product_ui == NULL) {
+    product_ui_t* product_ui = product_ui_create(lv_screen_active());
+    if (product_ui == NULL || product_ui_get_root(product_ui) == NULL) {
         fputs("Failed to create the Product UI.\n", stderr);
         return 1;
     }
-    if (!is_interaction_transparent(product_ui)) {
+    if (!is_interaction_transparent(product_ui_get_root(product_ui))) {
         fputs("Product UI blocks pointer input.\n", stderr);
         return 1;
     }
 
-    if (smoke_test || reference_path != NULL) {
-        for (int iteration = 0; iteration < 10; ++iteration) {
-            lv_timer_handler();
-            lv_delay_ms(5);
+    if (event_trace) {
+        return trace_events(product_ui, argv[2]);
+    }
+
+    for (int iteration = 0; iteration < 10; ++iteration) {
+        lv_timer_handler();
+        lv_delay_ms(5);
+    }
+
+    if (legacy_reference) {
+        product_ui_dispatch(product_ui, PRODUCT_UI_EVENT_CONNECTED);
+        product_ui_set_animation_time(product_ui, 0);
+        return write_reference_image(product_ui_get_root(product_ui), argv[2]);
+    }
+
+    if (render_state) {
+        if (!dispatch_state_path(product_ui, argv[2])) {
+            fprintf(stderr, "Unknown Product UI state: %s\n", argv[2]);
+            return 2;
         }
-        if (reference_path != NULL) {
-            return write_reference_image(product_ui, reference_path);
-        }
+        product_ui_set_playback_envelope(product_ui, (uint16_t)reference_envelope);
+        product_ui_set_animation_time(product_ui, 0);
+        product_ui_set_animation_time(product_ui, reference_time);
+        return write_reference_image(product_ui_get_root(product_ui), argv[5]);
+    }
+
+    if (smoke_test) {
         return 0;
     }
 
+    simulator_controls_t controls = {
+        .product_ui = product_ui,
+        .envelope = 0,
+    };
+    lv_indev_t* keyboard = lv_sdl_keyboard_create();
+    lv_group_t* keyboard_group = lv_group_create();
+    if (keyboard == NULL || keyboard_group == NULL) {
+        fputs("Failed to create simulator keyboard controls.\n", stderr);
+        return 1;
+    }
+    lv_group_add_obj(keyboard_group, product_ui_get_root(product_ui));
+    lv_indev_set_group(keyboard, keyboard_group);
+    lv_obj_add_event_cb(product_ui_get_root(product_ui), on_key, LV_EVENT_KEY, &controls);
+
+    puts(
+        "Controls: i connect/cancel, l listen, t think, s speak, x stop, "
+        "o offline, e error, r recover, +/- playback level");
     while (true) {
         lv_timer_handler();
         lv_delay_ms(5);

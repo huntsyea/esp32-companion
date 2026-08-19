@@ -62,11 +62,14 @@ public:
 
         SpiLcdDisplay::SetupUI();
         DisplayLockGuard lock(this);
-        lv_obj_t* product_ui_root = product_ui_create(lv_screen_active());
-        if (product_ui_root == nullptr) {
+        product_ui_ = product_ui_create(lv_screen_active());
+        if (product_ui_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create Product UI");
         }
     }
+
+private:
+    product_ui_t* product_ui_ = nullptr;
 };
 
 class CustomBoard : public WifiBoard {

@@ -2,6 +2,35 @@
 
 #include "product_identity.h"
 
+#include <stddef.h>
+
+#define PRODUCT_UI_ANIMATION_PERIOD_MS 33
+#define PRODUCT_UI_ENVELOPE_MAX 1000
+#define PRODUCT_UI_ENVELOPE_ATTACK_PER_MS 4
+#define PRODUCT_UI_ENVELOPE_RELEASE_PER_MS 2
+
+#define PRODUCT_UI_LISTENING_COLOR 0x3972A6
+#define PRODUCT_UI_THINKING_COLOR 0x4E83AA
+#define PRODUCT_UI_OFFLINE_COLOR 0x74838A
+#define PRODUCT_UI_ERROR_COLOR 0xD94A4A
+
+struct product_ui {
+    lv_obj_t* root;
+    lv_obj_t* body;
+    lv_obj_t* eyes[2];
+    lv_obj_t* side_marks[4];
+    lv_obj_t* top_marks[3];
+    lv_timer_t* animation_timer;
+    product_ui_state_t state;
+    product_ui_state_t recovery_state;
+    uint32_t timer_epoch_ms;
+    uint32_t animation_time_ms;
+    uint16_t envelope_target;
+    uint16_t envelope_smoothed;
+};
+
+static void render(product_ui_t* ui);
+
 static void make_event_transparent(lv_obj_t* object) {
     lv_obj_add_flag(object, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -27,31 +56,440 @@ static lv_obj_t* create_shape(lv_obj_t* parent, int32_t x, int32_t y, int32_t wi
     return shape;
 }
 
-static void create_eye(lv_obj_t* parent, int32_t x, int32_t y, int32_t width, int32_t height) {
+static lv_obj_t* create_eye(lv_obj_t* parent, int32_t x, int32_t y, int32_t width, int32_t height) {
     lv_obj_t* eye = create_shape(parent, x, y, width, height, PRODUCT_IDENTITY_EYE_COLOR,
                                  PRODUCT_IDENTITY_EYE_RADIUS);
     lv_obj_set_style_transform_pivot_x(eye, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_pivot_y(eye, LV_PCT(50), LV_PART_MAIN);
     lv_obj_set_style_transform_rotation(eye, PRODUCT_IDENTITY_EYE_ROTATION, LV_PART_MAIN);
+    return eye;
 }
 
-lv_obj_t* product_ui_create(lv_obj_t* parent) {
+static void set_visible(lv_obj_t* object, bool visible) {
+    if (visible) {
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void hide_state_marks(product_ui_t* ui) {
+    for (size_t index = 0; index < 4; ++index) {
+        set_visible(ui->side_marks[index], false);
+    }
+    for (size_t index = 0; index < 3; ++index) {
+        set_visible(ui->top_marks[index], false);
+    }
+}
+
+static int32_t triangle_wave(uint32_t time_ms, uint32_t period_ms, int32_t amplitude) {
+    const uint32_t phase = time_ms % period_ms;
+    const uint32_t half_period = period_ms / 2U;
+    if (phase <= half_period) {
+        return (int32_t)((phase * (uint32_t)amplitude) / half_period);
+    }
+    return (int32_t)(((period_ms - phase) * (uint32_t)amplitude) / half_period);
+}
+
+static int32_t idle_bob(uint32_t time_ms) {
+    const uint32_t phase = time_ms % 3400U;
+    if (phase < 850U) {
+        return -(int32_t)((phase * 2U) / 850U);
+    }
+    if (phase < 1700U) {
+        return -2 + (int32_t)(((phase - 850U) * 2U) / 850U);
+    }
+    if (phase < 2550U) {
+        return (int32_t)(((phase - 1700U) * 2U) / 850U);
+    }
+    return 2 - (int32_t)(((phase - 2550U) * 2U) / 850U);
+}
+
+static int32_t idle_glance(uint32_t time_ms) {
+    const uint32_t phase = time_ms % 7000U;
+    if (phase >= 2200U && phase < 2800U) {
+        return (int32_t)(((phase - 2200U) * 4U) / 600U);
+    }
+    if (phase >= 2800U && phase < 3600U) {
+        return 4;
+    }
+    if (phase >= 3600U && phase < 4200U) {
+        return 4 - (int32_t)(((phase - 3600U) * 4U) / 600U);
+    }
+    return 0;
+}
+
+static int32_t idle_eye_height(uint32_t time_ms) {
+    const uint32_t phase = time_ms % 4800U;
+    if (phase >= 4300U && phase < 4400U) {
+        return PRODUCT_IDENTITY_LEFT_EYE_HEIGHT - (int32_t)(((phase - 4300U) * 32U) / 100U);
+    }
+    if (phase >= 4400U && phase < 4500U) {
+        return 6 + (int32_t)(((phase - 4400U) * 32U) / 100U);
+    }
+    return PRODUCT_IDENTITY_LEFT_EYE_HEIGHT;
+}
+
+static void set_mark(lv_obj_t* mark, int32_t x, int32_t y, int32_t width, int32_t height,
+                     uint32_t color, int32_t radius, int32_t rotation) {
+    lv_obj_set_pos(mark, x, y);
+    lv_obj_set_size(mark, width, height);
+    lv_obj_set_style_bg_color(mark, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_radius(mark, radius, LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_x(mark, LV_PCT(50), LV_PART_MAIN);
+    lv_obj_set_style_transform_pivot_y(mark, LV_PCT(50), LV_PART_MAIN);
+    lv_obj_set_style_transform_rotation(mark, rotation, LV_PART_MAIN);
+    set_visible(mark, true);
+}
+
+static void render_idle(product_ui_t* ui) {
+    const int32_t breathe_width = triangle_wave(ui->animation_time_ms, 2800U, 4);
+    const int32_t breathe_height = triangle_wave(ui->animation_time_ms, 2800U, 2);
+    const int32_t bob = idle_bob(ui->animation_time_ms);
+    const int32_t glance = idle_glance(ui->animation_time_ms);
+    const int32_t eye_height = idle_eye_height(ui->animation_time_ms);
+    const int32_t eye_y =
+        PRODUCT_IDENTITY_LEFT_EYE_Y + bob + ((PRODUCT_IDENTITY_LEFT_EYE_HEIGHT - eye_height) / 2);
+
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X - (breathe_width / 2),
+                   PRODUCT_IDENTITY_BODY_Y + bob + (breathe_height / 2));
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH + breathe_width,
+                    PRODUCT_IDENTITY_BODY_HEIGHT - breathe_height);
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X + glance, eye_y);
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH, eye_height);
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X + glance, eye_y);
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH, eye_height);
+}
+
+static void render_listening(product_ui_t* ui) {
+    const int32_t pulse = triangle_wave(ui->animation_time_ms, 1000U, 10);
+    const int32_t outer_height = 14 + pulse;
+    const int32_t inner_height = 24 + pulse;
+
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X - 2, PRODUCT_IDENTITY_BODY_Y - 2);
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH + 4, PRODUCT_IDENTITY_BODY_HEIGHT + 4);
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X - 2, PRODUCT_IDENTITY_LEFT_EYE_Y - 4);
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH + 2,
+                    PRODUCT_IDENTITY_LEFT_EYE_HEIGHT + 8);
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X, PRODUCT_IDENTITY_RIGHT_EYE_Y - 4);
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH + 2,
+                    PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT + 8);
+
+    set_mark(ui->side_marks[0], 19, 123 - (outer_height / 2), 5, outer_height,
+             PRODUCT_UI_LISTENING_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[1], 27, 123 - (inner_height / 2), 5, inner_height,
+             PRODUCT_UI_LISTENING_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[2], 208, 123 - (inner_height / 2), 5, inner_height,
+             PRODUCT_UI_LISTENING_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[3], 216, 123 - (outer_height / 2), 5, outer_height,
+             PRODUCT_UI_LISTENING_COLOR, LV_RADIUS_CIRCLE, 0);
+}
+
+static void render_thinking(product_ui_t* ui) {
+    const uint32_t active_dot = (ui->animation_time_ms / 300U) % 3U;
+    const int32_t glance = ((int32_t)active_dot - 1) * 4;
+
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y);
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT);
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X + glance,
+                   PRODUCT_IDENTITY_LEFT_EYE_Y + 4);
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_LEFT_EYE_HEIGHT - 8);
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X + glance,
+                   PRODUCT_IDENTITY_RIGHT_EYE_Y + 4);
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT - 8);
+
+    for (size_t index = 0; index < 3; ++index) {
+        const int32_t size = index == active_dot ? 13 : 9;
+        const int32_t center_x = 99 + ((int32_t)index * 21);
+        set_mark(ui->top_marks[index], center_x - (size / 2), 51 - (size / 2), size, size,
+                 index == active_dot ? PRODUCT_IDENTITY_EYE_COLOR : PRODUCT_UI_THINKING_COLOR,
+                 LV_RADIUS_CIRCLE, 0);
+    }
+}
+
+static void render_speaking(product_ui_t* ui) {
+    const int32_t level = ui->envelope_smoothed;
+    const int32_t growth = (level * 16) / PRODUCT_UI_ENVELOPE_MAX;
+    const int32_t width_growth = (level * 6) / PRODUCT_UI_ENVELOPE_MAX;
+    const int32_t bar_height = 5 + ((level * 28) / PRODUCT_UI_ENVELOPE_MAX);
+
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X - (width_growth / 2),
+                   PRODUCT_IDENTITY_BODY_Y - (growth / 2));
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH + width_growth,
+                    PRODUCT_IDENTITY_BODY_HEIGHT + growth);
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X,
+                   PRODUCT_IDENTITY_LEFT_EYE_Y - (growth / 4));
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_LEFT_EYE_HEIGHT + (growth / 2));
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X,
+                   PRODUCT_IDENTITY_RIGHT_EYE_Y - (growth / 4));
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT + (growth / 2));
+
+    set_mark(ui->side_marks[0], 18, 123 - (bar_height / 2), 5, bar_height,
+             PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[1], 26, 123 - ((bar_height + 6) / 2), 5, bar_height + 6,
+             PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[2], 209, 123 - ((bar_height + 6) / 2), 5, bar_height + 6,
+             PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->side_marks[3], 217, 123 - (bar_height / 2), 5, bar_height,
+             PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE, 0);
+}
+
+static void render_offline(product_ui_t* ui) {
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y + 6);
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT);
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X, PRODUCT_IDENTITY_LEFT_EYE_Y + 20);
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH, 6);
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X, PRODUCT_IDENTITY_RIGHT_EYE_Y + 20);
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH, 6);
+
+    set_mark(ui->top_marks[0], 106, 48, 29, 5, PRODUCT_UI_OFFLINE_COLOR, LV_RADIUS_CIRCLE, 450);
+    set_mark(ui->top_marks[1], 106, 48, 29, 5, PRODUCT_UI_OFFLINE_COLOR, LV_RADIUS_CIRCLE, -450);
+}
+
+static void render_error(product_ui_t* ui) {
+    const int32_t pulse = triangle_wave(ui->animation_time_ms, 800U, 3);
+
+    lv_obj_set_pos(ui->body, PRODUCT_IDENTITY_BODY_X - pulse, PRODUCT_IDENTITY_BODY_Y - pulse);
+    lv_obj_set_size(ui->body, PRODUCT_IDENTITY_BODY_WIDTH + (pulse * 2),
+                    PRODUCT_IDENTITY_BODY_HEIGHT + (pulse * 2));
+    lv_obj_set_pos(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_X - 3, PRODUCT_IDENTITY_LEFT_EYE_Y + 6);
+    lv_obj_set_size(ui->eyes[0], PRODUCT_IDENTITY_LEFT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_LEFT_EYE_HEIGHT - 12);
+    lv_obj_set_pos(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_X + 3, PRODUCT_IDENTITY_RIGHT_EYE_Y + 6);
+    lv_obj_set_size(ui->eyes[1], PRODUCT_IDENTITY_RIGHT_EYE_WIDTH,
+                    PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT - 12);
+
+    set_mark(ui->top_marks[0], 117, 38, 7, 24, PRODUCT_UI_ERROR_COLOR, LV_RADIUS_CIRCLE, 0);
+    set_mark(ui->top_marks[1], 117, 67, 7, 7, PRODUCT_UI_ERROR_COLOR, LV_RADIUS_CIRCLE, 0);
+}
+
+static void render(product_ui_t* ui) {
+    hide_state_marks(ui);
+    switch (ui->state) {
+        case PRODUCT_UI_STATE_OFFLINE:
+            render_offline(ui);
+            break;
+        case PRODUCT_UI_STATE_IDLE:
+            render_idle(ui);
+            break;
+        case PRODUCT_UI_STATE_LISTENING:
+            render_listening(ui);
+            break;
+        case PRODUCT_UI_STATE_THINKING:
+            render_thinking(ui);
+            break;
+        case PRODUCT_UI_STATE_SPEAKING:
+            render_speaking(ui);
+            break;
+        case PRODUCT_UI_STATE_ERROR:
+            render_error(ui);
+            break;
+    }
+}
+
+static void set_state(product_ui_t* ui, product_ui_state_t state) {
+    ui->state = state;
+    ui->envelope_target = 0;
+    ui->envelope_smoothed = 0;
+    render(ui);
+}
+
+static void on_animation_timer(lv_timer_t* timer) {
+    product_ui_t* ui = lv_timer_get_user_data(timer);
+    product_ui_set_animation_time(ui, lv_tick_elaps(ui->timer_epoch_ms));
+}
+
+static void on_root_deleted(lv_event_t* event) {
+    product_ui_t* ui = lv_event_get_user_data(event);
+    if (ui->animation_timer != NULL) {
+        lv_timer_delete(ui->animation_timer);
+        ui->animation_timer = NULL;
+    }
+    lv_free(ui);
+}
+
+product_ui_t* product_ui_create(lv_obj_t* parent) {
     if (parent == NULL) {
         return NULL;
     }
 
-    lv_obj_t* root = lv_obj_create(parent);
-    lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
-    lv_obj_align(root, LV_ALIGN_CENTER, 0, 0);
-    apply_surface_style(root, PRODUCT_IDENTITY_BACKGROUND_COLOR, 0);
+    product_ui_t* ui = lv_malloc_zeroed(sizeof(*ui));
+    if (ui == NULL) {
+        return NULL;
+    }
 
-    create_shape(root, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y,
-                 PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT,
-                 PRODUCT_IDENTITY_BODY_COLOR, LV_RADIUS_CIRCLE);
-    create_eye(root, PRODUCT_IDENTITY_LEFT_EYE_X, PRODUCT_IDENTITY_LEFT_EYE_Y,
-               PRODUCT_IDENTITY_LEFT_EYE_WIDTH, PRODUCT_IDENTITY_LEFT_EYE_HEIGHT);
-    create_eye(root, PRODUCT_IDENTITY_RIGHT_EYE_X, PRODUCT_IDENTITY_RIGHT_EYE_Y,
-               PRODUCT_IDENTITY_RIGHT_EYE_WIDTH, PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT);
+    ui->root = lv_obj_create(parent);
+    lv_obj_set_size(ui->root, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(ui->root, LV_ALIGN_CENTER, 0, 0);
+    apply_surface_style(ui->root, PRODUCT_IDENTITY_BACKGROUND_COLOR, 0);
 
-    return root;
+    ui->body = create_shape(ui->root, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y,
+                            PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT,
+                            PRODUCT_IDENTITY_BODY_COLOR, LV_RADIUS_CIRCLE);
+    ui->eyes[0] = create_eye(ui->root, PRODUCT_IDENTITY_LEFT_EYE_X, PRODUCT_IDENTITY_LEFT_EYE_Y,
+                             PRODUCT_IDENTITY_LEFT_EYE_WIDTH, PRODUCT_IDENTITY_LEFT_EYE_HEIGHT);
+    ui->eyes[1] = create_eye(ui->root, PRODUCT_IDENTITY_RIGHT_EYE_X, PRODUCT_IDENTITY_RIGHT_EYE_Y,
+                             PRODUCT_IDENTITY_RIGHT_EYE_WIDTH, PRODUCT_IDENTITY_RIGHT_EYE_HEIGHT);
+
+    for (size_t index = 0; index < 4; ++index) {
+        ui->side_marks[index] =
+            create_shape(ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
+    }
+    for (size_t index = 0; index < 3; ++index) {
+        ui->top_marks[index] =
+            create_shape(ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
+    }
+
+    ui->state = PRODUCT_UI_STATE_OFFLINE;
+    ui->recovery_state = PRODUCT_UI_STATE_OFFLINE;
+    ui->timer_epoch_ms = lv_tick_get();
+    render(ui);
+    lv_obj_add_event_cb(ui->root, on_root_deleted, LV_EVENT_DELETE, ui);
+    ui->animation_timer = lv_timer_create(on_animation_timer, PRODUCT_UI_ANIMATION_PERIOD_MS, ui);
+    if (ui->animation_timer == NULL) {
+        lv_obj_delete(ui->root);
+        return NULL;
+    }
+    return ui;
+}
+
+lv_obj_t* product_ui_get_root(const product_ui_t* ui) { return ui == NULL ? NULL : ui->root; }
+
+bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
+    if (ui == NULL) {
+        return false;
+    }
+
+    product_ui_state_t next_state = ui->state;
+    switch (event) {
+        case PRODUCT_UI_EVENT_CONNECTED:
+            if (ui->state == PRODUCT_UI_STATE_OFFLINE) {
+                next_state = PRODUCT_UI_STATE_IDLE;
+            }
+            break;
+        case PRODUCT_UI_EVENT_LISTEN_STARTED:
+            if (ui->state == PRODUCT_UI_STATE_IDLE) {
+                next_state = PRODUCT_UI_STATE_LISTENING;
+            }
+            break;
+        case PRODUCT_UI_EVENT_RECORDING_ENDED:
+            if (ui->state == PRODUCT_UI_STATE_LISTENING) {
+                next_state = PRODUCT_UI_STATE_THINKING;
+            }
+            break;
+        case PRODUCT_UI_EVENT_TTS_STARTED:
+            if (ui->state == PRODUCT_UI_STATE_THINKING) {
+                next_state = PRODUCT_UI_STATE_SPEAKING;
+            }
+            break;
+        case PRODUCT_UI_EVENT_TTS_STOPPED:
+            if (ui->state == PRODUCT_UI_STATE_SPEAKING) {
+                next_state = PRODUCT_UI_STATE_IDLE;
+            }
+            break;
+        case PRODUCT_UI_EVENT_CANCELLED:
+            if (ui->state == PRODUCT_UI_STATE_LISTENING || ui->state == PRODUCT_UI_STATE_THINKING ||
+                ui->state == PRODUCT_UI_STATE_SPEAKING ||
+                (ui->state == PRODUCT_UI_STATE_ERROR &&
+                 ui->recovery_state != PRODUCT_UI_STATE_OFFLINE)) {
+                next_state = PRODUCT_UI_STATE_IDLE;
+            } else if (ui->state == PRODUCT_UI_STATE_ERROR) {
+                next_state = PRODUCT_UI_STATE_OFFLINE;
+            }
+            break;
+        case PRODUCT_UI_EVENT_DISCONNECTED:
+            next_state = PRODUCT_UI_STATE_OFFLINE;
+            break;
+        case PRODUCT_UI_EVENT_TEMPORARY_ERROR:
+            if (ui->state != PRODUCT_UI_STATE_ERROR) {
+                ui->recovery_state = ui->state;
+                next_state = PRODUCT_UI_STATE_ERROR;
+            }
+            break;
+        case PRODUCT_UI_EVENT_ERROR_RECOVERED:
+            if (ui->state == PRODUCT_UI_STATE_ERROR) {
+                next_state = ui->recovery_state;
+            }
+            break;
+    }
+
+    if (next_state == ui->state) {
+        return false;
+    }
+    set_state(ui, next_state);
+    return true;
+}
+
+product_ui_state_t product_ui_get_state(const product_ui_t* ui) {
+    return ui == NULL ? PRODUCT_UI_STATE_OFFLINE : ui->state;
+}
+
+const char* product_ui_state_name(product_ui_state_t state) {
+    switch (state) {
+        case PRODUCT_UI_STATE_OFFLINE:
+            return "offline";
+        case PRODUCT_UI_STATE_IDLE:
+            return "idle";
+        case PRODUCT_UI_STATE_LISTENING:
+            return "listening";
+        case PRODUCT_UI_STATE_THINKING:
+            return "thinking";
+        case PRODUCT_UI_STATE_SPEAKING:
+            return "speaking";
+        case PRODUCT_UI_STATE_ERROR:
+            return "error";
+    }
+    return "offline";
+}
+
+void product_ui_set_playback_envelope(product_ui_t* ui, uint16_t level_milli) {
+    if (ui == NULL) {
+        return;
+    }
+    ui->envelope_target =
+        level_milli > PRODUCT_UI_ENVELOPE_MAX ? PRODUCT_UI_ENVELOPE_MAX : level_milli;
+}
+
+uint16_t product_ui_get_smoothed_envelope(const product_ui_t* ui) {
+    return ui == NULL ? 0 : ui->envelope_smoothed;
+}
+
+void product_ui_set_animation_time(product_ui_t* ui, uint32_t time_ms) {
+    if (ui == NULL) {
+        return;
+    }
+
+    const uint32_t elapsed_ms =
+        time_ms >= ui->animation_time_ms ? time_ms - ui->animation_time_ms : 0;
+    ui->animation_time_ms = time_ms;
+
+    if (ui->state == PRODUCT_UI_STATE_SPEAKING) {
+        if (ui->envelope_target > ui->envelope_smoothed) {
+            const uint16_t remaining = ui->envelope_target - ui->envelope_smoothed;
+            const uint32_t time_to_target = (remaining + PRODUCT_UI_ENVELOPE_ATTACK_PER_MS - 1U) /
+                                            PRODUCT_UI_ENVELOPE_ATTACK_PER_MS;
+            ui->envelope_smoothed =
+                elapsed_ms >= time_to_target
+                    ? ui->envelope_target
+                    : (uint16_t)(ui->envelope_smoothed +
+                                 (elapsed_ms * PRODUCT_UI_ENVELOPE_ATTACK_PER_MS));
+        } else if (ui->envelope_target < ui->envelope_smoothed) {
+            const uint16_t remaining = ui->envelope_smoothed - ui->envelope_target;
+            const uint32_t time_to_target = (remaining + PRODUCT_UI_ENVELOPE_RELEASE_PER_MS - 1U) /
+                                            PRODUCT_UI_ENVELOPE_RELEASE_PER_MS;
+            ui->envelope_smoothed =
+                elapsed_ms >= time_to_target
+                    ? ui->envelope_target
+                    : (uint16_t)(ui->envelope_smoothed -
+                                 (elapsed_ms * PRODUCT_UI_ENVELOPE_RELEASE_PER_MS));
+        }
+    } else {
+        ui->envelope_target = 0;
+        ui->envelope_smoothed = 0;
+    }
+    render(ui);
 }
