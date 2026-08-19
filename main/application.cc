@@ -180,6 +180,11 @@ void Application::Run() {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
+            auto display = Board::GetInstance().GetDisplay();
+            remote_recording_active_ = false;
+            manual_listening_requested_.store(false);
+            display->SetPushToTalkActive(false);
+            display->SetConversationEvent(ConversationEvent::kTemporaryError);
             SetDeviceState(kDeviceStateIdle);
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
                   Lang::Sounds::OGG_EXCLAMATION);
@@ -523,15 +528,20 @@ void Application::InitializeProtocol() {
 
     protocol_->OnConnected([this]() {
         Schedule([this]() {
-            Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kConnected);
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetConversationEvent(ConversationEvent::kErrorRecovered);
+            display->SetConversationEvent(ConversationEvent::kConnected);
             DismissAlert();
         });
     });
 
     protocol_->OnDisconnected([this]() {
-        Schedule([]() {
-            Board::GetInstance().GetDisplay()->SetConversationEvent(
-                ConversationEvent::kDisconnected);
+        Schedule([this]() {
+            remote_recording_active_ = false;
+            manual_listening_requested_.store(false);
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetPushToTalkActive(false);
+            display->SetConversationEvent(ConversationEvent::kDisconnected);
         });
     });
 
@@ -560,6 +570,9 @@ void Application::InitializeProtocol() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
+            remote_recording_active_ = false;
+            manual_listening_requested_.store(false);
+            display->SetPushToTalkActive(false);
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
         });
@@ -578,12 +591,15 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
                     aborted_ = false;
+                    remote_recording_active_ = false;
+                    display->SetConversationEvent(ConversationEvent::kTtsStarted);
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
+                    display->SetConversationEvent(ConversationEvent::kTtsStopped);
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -600,7 +616,6 @@ void Application::InitializeProtocol() {
                     if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                         glyphs.clear();
                     }
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring),
                               glyphs = std::move(glyphs), bpp]() {
                         display->AddTextGlyphs(glyphs, bpp);
@@ -616,11 +631,10 @@ void Application::InitializeProtocol() {
                 if (!TextGlyphPayload::Parse(root, glyphs, bpp)) {
                     glyphs.clear();
                 }
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring),
                           glyphs = std::move(glyphs), bpp]() {
                     display->AddTextGlyphs(glyphs, bpp);
-                    display->SetChatMessage("user", message.c_str());
+                    display->SetTranscript(message.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
@@ -724,9 +738,15 @@ void Application::DismissAlert() {
 
 void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
-void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING); }
+void Application::StartListening() {
+    manual_listening_requested_.store(true);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
+}
 
-void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
+void Application::StopListening() {
+    manual_listening_requested_.store(false);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
+}
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
@@ -770,6 +790,11 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
     }
+    if (mode == kListeningModeManualStop && !manual_listening_requested_.load()) {
+        Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
 
     // Switch to performance mode before connecting to reduce latency
     auto& board = Board::GetInstance();
@@ -779,9 +804,19 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         if (!protocol_->OpenAudioChannel()) {
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error)
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetPushToTalkActive(false);
+            display->SetConversationEvent(ConversationEvent::kCancelled);
+            display->SetConversationEvent(ConversationEvent::kTemporaryError);
             SetDeviceState(kDeviceStateIdle);
             return;
         }
+    }
+
+    if (mode == kListeningModeManualStop && !manual_listening_requested_.load()) {
+        Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
+        SetDeviceState(kDeviceStateIdle);
+        return;
     }
 
     SetListeningMode(mode);
@@ -801,10 +836,22 @@ void Application::HandleStartListeningEvent() {
 
     if (!protocol_) {
         ESP_LOGE(TAG, "Protocol not initialized");
+        manual_listening_requested_.store(false);
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetPushToTalkActive(false);
+        display->SetConversationEvent(ConversationEvent::kCancelled);
+        display->SetConversationEvent(ConversationEvent::kTemporaryError);
         return;
     }
 
     if (state == kDeviceStateIdle) {
+        if (!manual_listening_requested_.load()) {
+            return;
+        }
+        remote_recording_active_ = false;
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetConversationEvent(ConversationEvent::kErrorRecovered);
+        display->SetConversationEvent(ConversationEvent::kListenStarted);
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
@@ -814,6 +861,7 @@ void Application::HandleStartListeningEvent() {
         SetListeningMode(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
+        Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kListenStarted);
         SetListeningMode(kListeningModeManualStop);
     }
 }
@@ -825,9 +873,18 @@ void Application::HandleStopListeningEvent() {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
+    } else if (state == kDeviceStateConnecting) {
+        remote_recording_active_ = false;
+        Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
+        SetDeviceState(kDeviceStateIdle);
     } else if (state == kDeviceStateListening) {
-        if (protocol_) {
+        if (protocol_ && remote_recording_active_) {
             protocol_->SendStopListening();
+            remote_recording_active_ = false;
+            Board::GetInstance().GetDisplay()->SetConversationEvent(
+                ConversationEvent::kRecordingEnded);
+        } else {
+            Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
         }
         SetDeviceState(kDeviceStateIdle);
     }
@@ -1000,9 +1057,19 @@ void Application::StartListeningAudio() {
         return;
     }
 
-    // Send the start listening command
+    if (!audio_service_.EnableVoiceProcessing(true)) {
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetPushToTalkActive(false);
+        display->SetConversationEvent(ConversationEvent::kCancelled);
+        display->SetConversationEvent(ConversationEvent::kTemporaryError);
+        manual_listening_requested_.store(false);
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+
+    // Do not start the remote recording until the local microphone path is ready.
     protocol_->SendStartListening(listening_mode_);
-    audio_service_.EnableVoiceProcessing(true);
+    remote_recording_active_ = true;
 
     ConfigureWakeWordForListening();
 
@@ -1034,9 +1101,11 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    remote_recording_active_ = false;
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }
+    Board::GetInstance().GetDisplay()->SetConversationEvent(ConversationEvent::kCancelled);
 }
 
 void Application::SetListeningMode(ListeningMode mode) {

@@ -4,6 +4,7 @@
 #include "view_helpers.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #define PRODUCT_UI_ANIMATION_PERIOD_MS 33
 #define PRODUCT_UI_ENVELOPE_MAX 1000
@@ -21,6 +22,7 @@ struct product_ui {
     lv_obj_t* eyes[2];
     lv_obj_t* side_marks[4];
     lv_obj_t* top_marks[3];
+    lv_obj_t* transcript_label;
     lv_timer_t* animation_timer;
     product_ui_state_t state;
     product_ui_state_t recovery_state;
@@ -28,6 +30,7 @@ struct product_ui {
     uint32_t animation_time_ms;
     uint16_t envelope_target;
     uint16_t envelope_smoothed;
+    char transcript[PRODUCT_UI_TRANSCRIPT_MAX_BYTES + 1U];
 };
 
 static void render(product_ui_t* ui);
@@ -322,6 +325,15 @@ product_ui_t* product_ui_create(lv_obj_t* parent) {
         ui->top_marks[index] = product_ui_view_create_shape(
             ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
     }
+    ui->transcript_label = lv_label_create(ui->root);
+    lv_obj_set_pos(ui->transcript_label, 15, 210);
+    lv_obj_set_size(ui->transcript_label, 210, 22);
+    lv_label_set_long_mode(ui->transcript_label, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_align(ui->transcript_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ui->transcript_label, lv_color_hex(PRODUCT_IDENTITY_EYE_COLOR),
+                                LV_PART_MAIN);
+    product_ui_view_make_event_transparent(ui->transcript_label);
+    product_ui_view_set_visible(ui->transcript_label, false);
 
     ui->state = PRODUCT_UI_STATE_OFFLINE;
     ui->recovery_state = PRODUCT_UI_STATE_OFFLINE;
@@ -353,6 +365,7 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
             break;
         case PRODUCT_UI_EVENT_LISTEN_STARTED:
             if (ui->state == PRODUCT_UI_STATE_IDLE) {
+                product_ui_set_transcript(ui, NULL);
                 next_state = PRODUCT_UI_STATE_LISTENING;
             }
             break;
@@ -372,6 +385,7 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
             }
             break;
         case PRODUCT_UI_EVENT_CANCELLED:
+            product_ui_set_transcript(ui, NULL);
             if (ui->state == PRODUCT_UI_STATE_LISTENING || ui->state == PRODUCT_UI_STATE_THINKING ||
                 ui->state == PRODUCT_UI_STATE_SPEAKING ||
                 (ui->state == PRODUCT_UI_STATE_ERROR &&
@@ -382,9 +396,11 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
             }
             break;
         case PRODUCT_UI_EVENT_DISCONNECTED:
+            product_ui_set_transcript(ui, NULL);
             next_state = PRODUCT_UI_STATE_OFFLINE;
             break;
         case PRODUCT_UI_EVENT_TEMPORARY_ERROR:
+            product_ui_set_transcript(ui, NULL);
             if (ui->state != PRODUCT_UI_STATE_ERROR) {
                 ui->recovery_state = ui->state;
                 next_state = PRODUCT_UI_STATE_ERROR;
@@ -436,6 +452,49 @@ void product_ui_set_playback_envelope(product_ui_t* ui, uint16_t level_milli) {
 
 uint16_t product_ui_get_smoothed_envelope(const product_ui_t* ui) {
     return ui == NULL ? 0 : ui->envelope_smoothed;
+}
+
+void product_ui_set_transcript(product_ui_t* ui, const char* transcript) {
+    if (ui == NULL) {
+        return;
+    }
+    ui->transcript[0] = '\0';
+    if (transcript == NULL || transcript[0] == '\0') {
+        lv_label_set_text(ui->transcript_label, "");
+        product_ui_view_set_visible(ui->transcript_label, false);
+        return;
+    }
+
+    const size_t length = strlen(transcript);
+    if (length <= PRODUCT_UI_TRANSCRIPT_MAX_BYTES) {
+        memcpy(ui->transcript, transcript, length + 1U);
+    } else {
+        const size_t content_limit = PRODUCT_UI_TRANSCRIPT_MAX_BYTES - 3U;
+        size_t copy_length = 0;
+        while (copy_length < content_limit && transcript[copy_length] != '\0') {
+            const unsigned char byte = (unsigned char)transcript[copy_length];
+            size_t codepoint_length = 1;
+            if ((byte & 0xE0U) == 0xC0U) {
+                codepoint_length = 2;
+            } else if ((byte & 0xF0U) == 0xE0U) {
+                codepoint_length = 3;
+            } else if ((byte & 0xF8U) == 0xF0U) {
+                codepoint_length = 4;
+            }
+            if (copy_length + codepoint_length > content_limit) {
+                break;
+            }
+            copy_length += codepoint_length;
+        }
+        memcpy(ui->transcript, transcript, copy_length);
+        memcpy(ui->transcript + copy_length, "...", 4U);
+    }
+    lv_label_set_text(ui->transcript_label, ui->transcript);
+    product_ui_view_set_visible(ui->transcript_label, true);
+}
+
+const char* product_ui_get_transcript(const product_ui_t* ui) {
+    return ui == NULL ? "" : ui->transcript;
 }
 
 void product_ui_set_animation_time(product_ui_t* ui, uint32_t time_ms) {

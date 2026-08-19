@@ -12,6 +12,8 @@ extern "C" {
 
 typedef struct product_ui product_ui_t;
 
+#define PRODUCT_UI_TRANSCRIPT_MAX_BYTES 96U
+
 typedef enum {
     PRODUCT_UI_STATE_OFFLINE,
     PRODUCT_UI_STATE_IDLE,
@@ -67,6 +69,12 @@ void product_ui_set_playback_envelope(product_ui_t* ui, uint16_t level_milli);
 
 /** Return the locally smoothed playback level for diagnostics. */
 uint16_t product_ui_get_smoothed_envelope(const product_ui_t* ui);
+
+/** Show bounded transcript text on the Avatar Screen. NULL clears it. */
+void product_ui_set_transcript(product_ui_t* ui, const char* transcript);
+
+/** Return the bounded transcript model for diagnostics and host tests. */
+const char* product_ui_get_transcript(const product_ui_t* ui);
 
 /**
  * Render a deterministic animation time in milliseconds.

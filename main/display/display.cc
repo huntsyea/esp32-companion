@@ -32,6 +32,10 @@ void Display::SetTimeSynchronized(bool synchronized) {}
 
 void Display::SetConversationEvent(ConversationEvent event) { (void)event; }
 
+void Display::SetTranscript(const char* transcript) { (void)transcript; }
+
+void Display::SetPushToTalkActive(bool active) { (void)active; }
+
 void Display::SetEmotion(const char* emotion) { ESP_LOGW(TAG, "SetEmotion: %s", emotion); }
 
 void Display::SetChatMessage(const char* role, const char* content) {

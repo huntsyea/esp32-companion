@@ -29,7 +29,8 @@ static void print_usage(const char* program) {
             "--render-clock EPOCH PATH | --render-clock-unsynchronized PATH | "
             "--inspect-clock EPOCH | --inspect-clock-unsynchronized | "
             "--trace-clock-updates FIRST SAME_MINUTE NEXT_MINUTE | "
-            "--inspect-clock-zone ZONE EPOCH | --trace-navigation ACTIONS]\n",
+            "--inspect-clock-zone ZONE EPOCH | --trace-navigation ACTIONS | "
+            "--inspect-transcript TEXT]\n",
             program);
 }
 
@@ -270,6 +271,17 @@ static int trace_events(product_ui_t* ui, const char* event_list) {
     return 0;
 }
 
+static int inspect_transcript(product_ui_t* ui, const char* transcript) {
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_CONNECTED);
+    product_ui_set_transcript(ui, transcript);
+    const size_t stored_bytes = strlen(product_ui_get_transcript(ui));
+    const bool truncated = stored_bytes < strlen(transcript);
+    product_ui_dispatch(ui, PRODUCT_UI_EVENT_LISTEN_STARTED);
+    printf("bytes=%zu truncated=%s cleared_on_listen=%s\n", stored_bytes, truncated ? "yes" : "no",
+           product_ui_get_transcript(ui)[0] == '\0' ? "yes" : "no");
+    return 0;
+}
+
 static void print_navigation_line(const char* action, const char* result,
                                   screen_manager_t* screen_manager, product_ui_t* product_ui,
                                   const char* clock_result, const char* animation_result) {
@@ -455,10 +467,12 @@ int main(int argc, char** argv) {
     const bool trace_clock = argc == 5 && strcmp(argv[1], "--trace-clock-updates") == 0;
     const bool inspect_clock_zone = argc == 4 && strcmp(argv[1], "--inspect-clock-zone") == 0;
     const bool navigation_trace = argc == 3 && strcmp(argv[1], "--trace-navigation") == 0;
+    const bool transcript_inspection = argc == 3 && strcmp(argv[1], "--inspect-transcript") == 0;
     const bool interactive = argc == 1;
     if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace &&
         !render_clock && !render_clock_unsynchronized && !inspect_clock_epoch &&
-        !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone && !navigation_trace) {
+        !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone && !navigation_trace &&
+        !transcript_inspection) {
         print_usage(argv[0]);
         return 2;
     }
@@ -551,6 +565,9 @@ int main(int argc, char** argv) {
     }
     if (navigation_trace) {
         return trace_navigation(screen_manager, product_ui, clock_screen, argv[2]);
+    }
+    if (transcript_inspection) {
+        return inspect_transcript(product_ui, argv[2]);
     }
 
     if (inspect_clock_epoch || inspect_clock_unsynchronized) {

@@ -57,6 +57,8 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetTimeSynchronized(bool synchronized);
     virtual void SetConversationEvent(ConversationEvent event);
+    virtual void SetTranscript(const char* transcript);
+    virtual void SetPushToTalkActive(bool active);
     virtual void SetPowerSaveMode(bool on);
     virtual bool AddTextGlyphs(const std::vector<TextGlyph>& glyphs, uint8_t bpp) { return false; }
     virtual void ClearTextGlyphs() {}

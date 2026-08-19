@@ -1,30 +1,31 @@
-#include "wifi_board.h"
-#include "codecs/box_audio_codec.h"
-#include "display/lcd_display.h"
-#include "system_reset.h"
 #include "application.h"
 #include "button.h"
-#include "config.h"
 #include "clock_screen.h"
+#include "codecs/box_audio_codec.h"
 #include "companion_time.h"
+#include "config.h"
+#include "display/lcd_display.h"
 #include "mcp_server.h"
 #include "product_ui.h"
 #include "screen_manager.h"
+#include "system_reset.h"
+#include "wifi_board.h"
 
-#include <esp_log.h>
-#include "i2c_device.h"
 #include <driver/i2c_master.h>
-#include <wifi_station.h>
-#include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_vendor.h>
+#include <esp_log.h>
+#include <wifi_station.h>
+#include "i2c_device.h"
 
 #include <esp_timer.h>
 #include <time.h>
+#include <atomic>
 
+#include "assets/lang_config.h"
 #include "power_save_timer.h"
 #include "settings.h"
-#include "assets/lang_config.h"
 
 #include <esp_lcd_touch_cst816s.h>
 #include <esp_lvgl_port.h>
@@ -32,12 +33,13 @@
 
 #include "iot_button.h"
 
-#include "power_manager.h"
 #include "esp_ota_ops.h"
+#include "power_manager.h"
 
 #define TAG "waveshare_esp32_s3_touch_lcd_1_54"
+#define PUSH_TO_TALK_HOLD_MS 250
 
-class CustomButton: public Button{
+class CustomButton : public Button {
 public:
     void OnPressDownDel(void) {
         if (button_handle_ == nullptr) {
@@ -167,6 +169,22 @@ public:
         Unlock();
     }
 
+    void SetTranscript(const char* transcript) override {
+        if (product_ui_ == nullptr || !Lock(1)) {
+            return;
+        }
+        product_ui_set_transcript(product_ui_, transcript);
+        Unlock();
+    }
+
+    void SetPushToTalkActive(bool active) override {
+        if (screen_manager_ == nullptr || !Lock(1)) {
+            return;
+        }
+        screen_manager_set_push_to_talk_active(screen_manager_, active);
+        Unlock();
+    }
+
 private:
     static void OnGesture(lv_event_t* event) {
         auto* display = static_cast<CompanionDisplay*>(lv_event_get_user_data(event));
@@ -205,6 +223,57 @@ private:
     LcdDisplay* display_;
     PowerManager* power_manager_ = nullptr;
     PowerSaveTimer* power_save_timer_ = nullptr;
+    esp_timer_handle_t push_to_talk_timer_ = nullptr;
+    std::atomic<bool> push_to_talk_pressed_{false};
+    std::atomic<bool> push_to_talk_active_{false};
+    std::atomic<bool> push_to_talk_consumed_click_{false};
+
+    void BeginPushToTalk() {
+        if (!push_to_talk_pressed_.load() || push_to_talk_active_.exchange(true)) {
+            return;
+        }
+        auto& app = Application::GetInstance();
+        GetDisplay()->SetPushToTalkActive(true);
+        app.StartListening();
+    }
+
+    void EndPushToTalk() {
+        if (push_to_talk_timer_ != nullptr && esp_timer_is_active(push_to_talk_timer_)) {
+            esp_timer_stop(push_to_talk_timer_);
+        }
+        if (!push_to_talk_active_.exchange(false)) {
+            return;
+        }
+        Application::GetInstance().StopListening();
+        GetDisplay()->SetPushToTalkActive(false);
+    }
+
+    void InitializePushToTalkTimer() {
+        const esp_timer_create_args_t timer_args = {
+            .callback =
+                [](void* context) {
+                    auto* board = static_cast<CustomBoard*>(context);
+                    if (!board->push_to_talk_pressed_.load()) {
+                        return;
+                    }
+                    board->push_to_talk_consumed_click_.store(true);
+                    Application::GetInstance().Schedule([board]() { board->BeginPushToTalk(); });
+                },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "push_to_talk",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &push_to_talk_timer_));
+    }
+
+    void ReleasePushToTalk() {
+        push_to_talk_pressed_.store(false);
+        if (push_to_talk_timer_ != nullptr && esp_timer_is_active(push_to_talk_timer_)) {
+            esp_timer_stop(push_to_talk_timer_);
+        }
+        Application::GetInstance().Schedule([this]() { EndPushToTalk(); });
+    }
 
     void InitializePowerManager() {
         power_manager_ = new PowerManager(BATTERY_CHARGING_PIN, BATTERY_ADC_PIN, BATTERY_EN_PIN);
@@ -225,9 +294,7 @@ private:
             display->SetEmotion("neutral");
             GetBacklight()->RestoreBrightness();
         });
-        power_save_timer_->OnShutdownRequest([this]() {
-            power_manager_->PowerOff();
-        });
+        power_save_timer_->OnShutdownRequest([this]() { power_manager_->PowerOff(); });
         power_save_timer_->SetEnabled(true);
     }
 
@@ -241,13 +308,14 @@ private:
             .glitch_ignore_cnt = 7,
             .intr_priority = 0,
             .trans_queue_depth = 0,
-            .flags = {
-                .enable_internal_pullup = 1,
-            },
+            .flags =
+                {
+                    .enable_internal_pullup = 1,
+                },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
     }
-    
+
     void InitializeSpi() {
         ESP_LOGI(TAG, "Initialize QSPI bus");
         spi_bus_config_t buscfg = {};
@@ -260,8 +328,7 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
-    void InitializeTouch()
-    {
+    void InitializeTouch() {
         esp_err_t ret = ESP_OK;
         esp_lcd_touch_handle_t touch_handle;
 
@@ -282,18 +349,18 @@ private:
             .y_max = DISPLAY_HEIGHT,
             .rst_gpio_num = TOOUCH_RST_PIN,
             .int_gpio_num = TOOUCH_INT_PIN,
-            .flags = {
-                .swap_xy = 0,
-                .mirror_x = 0,
-                .mirror_y = 0,
-            },
+            .flags =
+                {
+                    .swap_xy = 0,
+                    .mirror_x = 0,
+                    .mirror_y = 0,
+                },
         };
         ESP_LOGI(TAG, "Initialize touch controller CST816");
         ret = esp_lcd_touch_new_i2c_cst816s(tp_io_handle, &tp_cfg, &touch_handle);
-        if (ret == ESP_OK)
-        {
+        if (ret == ESP_OK) {
             const lvgl_port_touch_cfg_t touch_cfg = {
-                .disp = lv_display_get_default(), 
+                .disp = lv_display_get_default(),
                 .handle = touch_handle,
             };
             lvgl_port_add_touch(&touch_cfg);
@@ -316,7 +383,6 @@ private:
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io));
 
-
         // 初始化液晶屏驱动芯片
         ESP_LOGI(TAG, "Install LCD driver");
         esp_lcd_panel_dev_config_t panel_config = {};
@@ -325,10 +391,9 @@ private:
         panel_config.bits_per_pixel = 16;
 
         ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel));
-         
-       
+
         esp_lcd_panel_reset(panel);
- 
+
         esp_lcd_panel_init(panel);
         esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR);
         esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
@@ -340,21 +405,35 @@ private:
     }
 
     void InitializeButtons() {
-
         pwr_button_.OnPressUp([this]() {
+            // Ignore the release that follows boot, then install deliberate PTT controls.
+            pwr_button_.OnPressUpDel();
+            pwr_button_.OnPressDown([this]() {
+                push_to_talk_pressed_.store(true);
+                if (push_to_talk_timer_ != nullptr && !esp_timer_is_active(push_to_talk_timer_)) {
+                    esp_timer_start_once(push_to_talk_timer_, PUSH_TO_TALK_HOLD_MS * 1000U);
+                }
+            });
+            pwr_button_.OnPressUp([this]() { ReleasePushToTalk(); });
             pwr_button_.OnClick([this]() {
+                if (push_to_talk_consumed_click_.exchange(false)) {
+                    return;
+                }
                 auto& app = Application::GetInstance();
                 app.ToggleChatState();
             });
             pwr_button_.OnLongPress([this]() {
-                printf("Power button long press\n");
-                // gpio_set_level(BATTERY_EN_PIN, 0);
-                if (power_manager_ != nullptr){
+                push_to_talk_pressed_.store(false);
+                EndPushToTalk();
+                if (power_manager_ != nullptr) {
                     power_manager_->PowerOff();
                 }
             });
 
             pwr_button_.OnDoubleClick([this]() {
+                if (push_to_talk_consumed_click_.exchange(false)) {
+                    return;
+                }
                 static uint8_t brightness_last = 0;
                 auto backlight = Board::GetInstance().GetBacklight();
                 if (backlight->brightness() == 0) {
@@ -369,10 +448,14 @@ private:
                     backlight->SetBrightness(0);
                 }
             });
-            pwr_button_.OnMultipleClick([this]() {
-                EnterWifiConfigMode();
-            }, 3);
-            pwr_button_.OnPressUpDel();
+            pwr_button_.OnMultipleClick(
+                [this]() {
+                    if (push_to_talk_consumed_click_.exchange(false)) {
+                        return;
+                    }
+                    EnterWifiConfigMode();
+                },
+                3);
         });
 
         volume_up_button_.OnClick([this]() {
@@ -382,7 +465,7 @@ private:
                 volume = 100;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume/10));
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume / 10));
         });
 
         volume_up_button_.OnLongPress([this]() {
@@ -397,7 +480,7 @@ private:
                 volume = 0;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume/10));
+            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume / 10));
         });
 
         volume_down_button_.OnLongPress([this]() {
@@ -417,59 +500,49 @@ private:
 
     // 初始化工具
     void InitializeTools() {
-        auto &mcp_server = McpServer::GetInstance();
+        auto& mcp_server = McpServer::GetInstance();
         mcp_server.AddTool("self.system.reconfigure_wifi",
-            "Reboot the device and enter WiFi configuration mode.\n"
-            "**CAUTION** You must ask the user to confirm this action.",
-            PropertyList(), [this](const PropertyList& properties) {
-                EnterWifiConfigMode();
-                return true;
-            });
+                           "Reboot the device and enter WiFi configuration mode.\n"
+                           "**CAUTION** You must ask the user to confirm this action.",
+                           PropertyList(), [this](const PropertyList& properties) {
+                               EnterWifiConfigMode();
+                               return true;
+                           });
     }
 
 public:
-    CustomBoard() :
-        pwr_button_(PWR_BUTTON_GPIO),
-        volume_up_button_(VOLUME_UP_BUTTON_GPIO),
-        volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
+    CustomBoard()
+        : pwr_button_(PWR_BUTTON_GPIO),
+          volume_up_button_(VOLUME_UP_BUTTON_GPIO),
+          volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
         InitializePowerManager();
         InitializePowerSaveTimer();
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeTouch();
+        InitializePushToTalkTimer();
         InitializeButtons();
         InitializeTools();
         GetBacklight()->RestoreBrightness();
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-       static BoxAudioCodec audio_codec(
-            i2c_bus_, 
-            AUDIO_INPUT_SAMPLE_RATE, 
-            AUDIO_OUTPUT_SAMPLE_RATE,
-            AUDIO_I2S_GPIO_MCLK, 
-            AUDIO_I2S_GPIO_BCLK, 
-            AUDIO_I2S_GPIO_WS, 
-            AUDIO_I2S_GPIO_DOUT, 
-            AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN, 
-            AUDIO_CODEC_ES8311_ADDR, 
-            AUDIO_CODEC_ES7210_ADDR, 
-            true);
+        static BoxAudioCodec audio_codec(
+            i2c_bus_, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK,
+            AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
+            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, true);
         return &audio_codec;
     }
 
-    virtual Display* GetDisplay() override {
-        return display_;
-    }
-    
+    virtual Display* GetDisplay() override { return display_; }
+
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
     }
 
-    virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
         static bool last_discharging = false;
         charging = power_manager_->IsCharging();
         discharging = power_manager_->IsDischarging();
