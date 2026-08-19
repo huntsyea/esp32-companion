@@ -38,7 +38,6 @@ static bool is_interaction_transparent(lv_obj_t* object) {
 }
 
 static int write_reference_image(lv_obj_t* product_ui, const char* path) {
-    lv_obj_update_layout(product_ui);
     lv_draw_buf_t* snapshot = lv_snapshot_create_draw_buf(product_ui, LV_COLOR_FORMAT_RGB888);
     if (snapshot != NULL && lv_snapshot_take_to_draw_buf(product_ui, LV_COLOR_FORMAT_RGB888,
                                                          snapshot) != LV_RESULT_OK) {

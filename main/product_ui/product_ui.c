@@ -7,7 +7,7 @@ static void make_event_transparent(lv_obj_t* object) {
     lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 }
 
-static void apply_shape_style(lv_obj_t* object, uint32_t color, int32_t radius) {
+static void apply_surface_style(lv_obj_t* object, uint32_t color, int32_t radius) {
     lv_obj_set_style_bg_color(object, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(object, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_border_width(object, 0, LV_PART_MAIN);
@@ -23,7 +23,7 @@ static lv_obj_t* create_shape(lv_obj_t* parent, int32_t x, int32_t y, int32_t wi
     lv_obj_t* shape = lv_obj_create(parent);
     lv_obj_set_pos(shape, x, y);
     lv_obj_set_size(shape, width, height);
-    apply_shape_style(shape, color, radius);
+    apply_surface_style(shape, color, radius);
     return shape;
 }
 
@@ -43,13 +43,7 @@ lv_obj_t* product_ui_create(lv_obj_t* parent) {
     lv_obj_t* root = lv_obj_create(parent);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
     lv_obj_align(root, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(root, lv_color_hex(PRODUCT_IDENTITY_BACKGROUND_COLOR), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(root, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(root, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(root, 0, LV_PART_MAIN);
-    lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_OFF);
-    make_event_transparent(root);
+    apply_surface_style(root, PRODUCT_IDENTITY_BACKGROUND_COLOR, 0);
 
     create_shape(root, PRODUCT_IDENTITY_BODY_X, PRODUCT_IDENTITY_BODY_Y,
                  PRODUCT_IDENTITY_BODY_WIDTH, PRODUCT_IDENTITY_BODY_HEIGHT,
