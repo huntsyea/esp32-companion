@@ -3,6 +3,10 @@
 
 #include <cstddef>
 
+constexpr size_t kMaxIncomingAudioFrameBytes = 16 * 1024;
+constexpr size_t kMaxIncomingJsonBytes = 16 * 1024;
+constexpr size_t kMaxIncomingWebSocketMessageBytes = 16 * 1024;
+
 inline bool IsValidIncomingPayload(size_t payload_size, size_t maximum_size) {
     return payload_size > 0 && payload_size <= maximum_size;
 }

@@ -26,6 +26,10 @@ lv_obj_t* product_ui_view_create_shape(lv_obj_t* parent, int32_t x, int32_t y, i
 }
 
 void product_ui_view_set_visible(lv_obj_t* object, bool visible) {
+    bool hidden = lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN);
+    if (hidden == !visible) {
+        return;
+    }
     if (visible) {
         lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
     } else {

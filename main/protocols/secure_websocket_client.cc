@@ -1,5 +1,7 @@
 #include "secure_websocket_client.h"
 
+#include "incoming_frame_limits.h"
+
 #include <esp_log.h>
 
 #include <limits>
@@ -137,20 +139,33 @@ void SecureWebSocketClient::HandleEvent(int32_t event_id, const esp_websocket_ev
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || event == nullptr || event->data_len < 0 ||
-        event->payload_offset < 0 || event->payload_len < 0) {
+        event->payload_offset < 0 || event->payload_len < 0 ||
+        (event->data_len > 0 && event->data_ptr == nullptr)) {
+        return;
+    }
+
+    const size_t data_length = static_cast<size_t>(event->data_len);
+    const size_t payload_offset = static_cast<size_t>(event->payload_offset);
+    const size_t payload_length = static_cast<size_t>(event->payload_len);
+    if (!IsValidIncomingPayload(payload_length, kMaxIncomingWebSocketMessageBytes) ||
+        payload_offset > payload_length || data_length > payload_length - payload_offset ||
+        (payload_offset != 0 && payload_offset != incoming_message_.size())) {
+        incoming_message_.clear();
+        ESP_LOGW(TAG, "Rejected invalid fragmented WebSocket message");
         return;
     }
 
     if (event->payload_offset == 0) {
         incoming_message_.clear();
         incoming_binary_ = event->op_code == 0x2;
-        incoming_message_.reserve(static_cast<size_t>(event->payload_len));
+        incoming_message_.reserve(payload_length);
     }
     incoming_message_.insert(incoming_message_.end(), event->data_ptr,
                              event->data_ptr + event->data_len);
-    if (event->fin && incoming_message_.size() == static_cast<size_t>(event->payload_len) &&
-        on_data_) {
-        on_data_(incoming_message_.data(), incoming_message_.size(), incoming_binary_);
+    if (event->fin) {
+        if (incoming_message_.size() == payload_length && on_data_) {
+            on_data_(incoming_message_.data(), incoming_message_.size(), incoming_binary_);
+        }
         incoming_message_.clear();
     }
 }

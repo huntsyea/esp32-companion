@@ -19,9 +19,6 @@
 
 namespace {
 
-constexpr size_t kMaxIncomingAudioFrameBytes = 16 * 1024;
-constexpr size_t kMaxIncomingJsonBytes = 16 * 1024;
-
 bool ProbeMdnsHost(const std::string& configured_host) {
     std::string host = configured_host;
     constexpr const char* kLocalSuffix = ".local";

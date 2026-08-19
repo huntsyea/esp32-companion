@@ -626,7 +626,6 @@ void Application::InitializeProtocol() {
                     if (!conversation_session_.Matches(session_id, epoch)) {
                         return;
                     }
-                    aborted_ = false;
                     remote_recording_active_ = false;
                     pending_tts_stop_ = false;
                     display->SetPlaybackEnvelope(0);
@@ -1216,7 +1215,6 @@ void Application::EndConversation(AbortReason reason, ConversationFailure failur
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.DiscardPendingCapture();
     audio_service_.ResetDecoder();
-    aborted_ = true;
     pending_listening_start_ = false;
     capture_stop_.Cancel();
     pending_tts_stop_ = false;
