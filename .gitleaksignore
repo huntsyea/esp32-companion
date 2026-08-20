@@ -1,0 +1,9 @@
+# Upstream example/placeholder values, not live credentials (verified 2026-08-19):
+# docs/mqtt-udp*.md: documented sample key 0123456789ABCDEF0123456789ABCDEF
+161c4f229d7eab8a4b018382c7ad520df6d071ce:docs/mqtt-udp_zh.md:generic-api-key:108
+8d9ae530371b5af8872af8e9ba137267961bea39:docs/mqtt-udp.md:generic-api-key:108
+# scripts/license_tools/README.md: published sample in upstream doc
+3a36f09dba0212bf541eaa207d51b9a6f741928d:scripts/license_tools/README.md:generic-api-key:133
+# OpenThread spec example master key 001122...eeff (documented placeholder)
+82f7483a616d94def7f7043417ee68fc519fcbce:main/boards/m5stack-tab5/sdkconfig.tab5:generic-api-key:2161
+18a30cfc0015ab4539ea97f13fae5e0b74552663:sdkconfig.box:generic-api-key:1863
