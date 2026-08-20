@@ -1,4 +1,12 @@
-# An MCP-based Chatbot
+# ESP32 Companion Firmware
+
+Companion firmware for the Waveshare ESP32-S3-Touch-LCD-1.54: a Blobatar conversation UI + clock screen with push-to-talk voice, talking over a secure LAN WebSocket to the Hermes runtime via the [hermes-esp32](https://github.com/huntsyea/hermes-esp32) adapter plugin. See PROTOCOL.md, docs/companion-validation.md, and the simulator under simulator/.
+
+This tree is based on the Xiaozhi ESP32 project (see NOTICE and LICENSE).
+
+---
+
+# Upstream: An MCP-based Chatbot
 
 (English | [中文](README_zh.md) | [日本語](README_ja.md))
 

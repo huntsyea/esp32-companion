@@ -1,0 +1,6 @@
+/build/
+/managed_components/
+/simulator/build/
+/simulator/build-macos/
+/sdkconfig
+/sdkconfig.old

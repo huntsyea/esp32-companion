@@ -1,0 +1,7 @@
+This repository is a companion-device firmware built on the Xiaozhi ESP32 project
+(https://github.com/78/xiaozhi-esp32), copyright Shenzhen Xinzhi Future Technology
+Co., Ltd. and Project Contributors, licensed under the MIT License (see LICENSE).
+
+Companion additions (Blobatar conversation UI, clock screen, Hermes LAN voice
+adapter, push-to-talk, secure channel, validation runbook) are copyright
+huntsyea and licensed under the same MIT License.
