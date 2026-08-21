@@ -54,14 +54,19 @@ Do not flash or restore until the operator confirms the exact device and serial
 port and gives explicit approval. A full restore overwrites all 16 MB,
 including device state.
 
-The production firmware flash is also a separate destructive operation. After
-the operator gives explicit approval for the selected device and the automated
-report is green, flash the built image from the repository root:
+The firmware flash is also a separate destructive operation. After the operator
+gives explicit approval for the selected device and the automated report is
+green, use the board flash helper from the repository root:
 
 ```sh
-COMPANION_FLASH_PORT="/dev/cu.usbmodem..."
-idf.py --port "${COMPANION_FLASH_PORT}" flash
+COMPANION_FLASH_PORT="/dev/cu.usbmodem..." ./flash.sh
+# or: ./flash.sh --build --port /dev/cu.usbmodem...
 ```
+
+The helper replaces bare `idf.py flash`, which fails silently on this board:
+the ESP32-S3 native USB-JTAG/serial has no auto-reset lines. Hold the BOOT
+button, tap RESET, and keep holding BOOT until esptool reports it is writing;
+`flash.sh` prints this warning and requires an explicit board-name confirmation.
 
 Do not treat that approval as approval for a later factory restore. Confirm the
 restore separately with this exact warning:
@@ -129,6 +134,68 @@ report or serial log.
 Install or configure the Hermes adapter, listener, certificate, and token only
 through a separate approved operation on the Mac mini. The validation tool does
 not perform those changes.
+
+## Connect verification (device ↔ Hermes WSS)
+
+Confirm the device reaches the Hermes adapter over the secure WebSocket link
+before recording live voice evidence. The adapter is configured on the Mac mini
+in a **separate, approved operation**; this runbook only *verifies* the link. Do
+not log tokens, private keys, or certificate material.
+
+### Prerequisites
+
+- Hermes is running with the `xiaozhi_companion` platform adapter configured for
+  `transport=wss` (default listener `port=8765`), a TLS certificate, and a device
+  token store. Device access is gated by the `XIAOZHI_COMPANION_ALLOWED_DEVICES`
+  / `XIAOZHI_COMPANION_ALLOW_ALL_DEVICES` policies.
+- The device has joined the LAN and is provisioned with a companion connection
+  config. In physical mode (`CompanionConnectionMode::kPhysical`) the firmware
+  requires WSS and a CA trust anchor, resolves the endpoint via mDNS
+  (`wss://<mdns_host>:<port>/xiaozhi/v1`) when the host is advertised, and falls
+  back to `fallback_url` otherwise. Loopback development mode accepts plaintext
+  `ws://127.0.0.1`.
+
+### 1. Confirm the listener is bound (Mac mini)
+
+```sh
+lsof -nP -iTCP:8765 -sTCP:LISTEN
+```
+
+Expect an entry bound to the configured `bind_host:port` with TLS. A missing
+listener means the adapter is not up; do not proceed.
+
+### 2. Confirm the device can resolve the endpoint
+
+Confirm the device is provisioned with either a reachable `mdns_host` (probe
+returns the host) or a `fallback_url` that matches the listener above. The
+firmware rejects unsafe hostnames/paths and a missing CA trust anchor in
+physical mode, so a misconfigured endpoint surfaces as a `Reject(...)` before
+any connection attempt.
+
+### 3. Capture the device boot/connect log
+
+Use the proven boot-log tool and watch for a successful WSS handshake and
+session negotiation (do not log credentials):
+
+```sh
+python3 tools/boot_capture.py /dev/cu.usbmodem3101 12
+```
+
+Success signals: the device resolves the endpoint, establishes TLS, and
+negotiates a session on `/xiaozhi/v1`. The serial log must not contain raw
+token or certificate material.
+
+### 4. Confirm a registered session on the adapter
+
+In the Hermes adapter logs, confirm the device appears as an active session
+(negotiated) on the expected `chat_id`/device id. A session that does not
+negotiate, or a device rejected by the allow-list, is a failure.
+
+### Development (no device)
+
+To validate the same protocol path without hardware, drive the adapter's
+loopback transport (in `hermes-esp32`) with the desktop protocol harness and its
+automated tests. That does not replace the physical WSS link check above.
 
 ## Scope limits
 
