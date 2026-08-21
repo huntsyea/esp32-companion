@@ -35,7 +35,7 @@ class ScreenManagerTests(unittest.TestCase):
         ]
 
     def test_both_swipe_directions_and_edges_are_deterministic(self):
-        trace = self.trace("right", "left", "left", "right", "right")
+        trace = self.trace("right", "left", "left", "left", "right", "right")
 
         self.assertEqual(
             [(line["result"], line["selected"], line["visible"]) for line in trace],
@@ -43,9 +43,10 @@ class ScreenManagerTests(unittest.TestCase):
                 ("initial", "avatar", "avatar"),
                 ("ignored", "avatar", "avatar"),
                 ("changed", "clock", "clock"),
-                ("ignored", "clock", "clock"),
+                ("changed", "status", "status"),
+                ("ignored", "status", "status"),
+                ("changed", "clock", "clock"),
                 ("changed", "avatar", "avatar"),
-                ("ignored", "avatar", "avatar"),
             ],
         )
 

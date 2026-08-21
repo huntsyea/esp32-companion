@@ -1,4 +1,5 @@
 import calendar
+import re
 import subprocess
 import tempfile
 import unittest
@@ -44,7 +45,9 @@ class CompanionClockTests(unittest.TestCase):
 
     def inspect_epoch(self, epoch):
         output = self.run_simulator("--inspect-clock", str(epoch))
-        return dict(field.split("=", 1) for field in output.split())
+        # Values may contain spaces (e.g. date=Jan 15, 2026), so split on the
+        # next `key=` boundary rather than on whitespace.
+        return dict(re.findall(r"(\w+)=(.*?)(?=\s+\w+=|$)", output))
 
     def test_midnight_noon_and_date_rollover(self):
         midnight = self.inspect_epoch(utc_epoch(2026, 1, 15, 6, 0))
@@ -55,11 +58,11 @@ class CompanionClockTests(unittest.TestCase):
         self.assertEqual(midnight["time"], "12:00")
         self.assertEqual(midnight["period"], "AM")
         self.assertEqual(midnight["weekday"], "Thu")
-        self.assertEqual(midnight["date"], "Jan-15-2026")
+        self.assertEqual(midnight["date"], "Jan 15, 2026")
         self.assertEqual(noon["time"], "12:00")
         self.assertEqual(noon["period"], "PM")
-        self.assertEqual(before_rollover["date"], "Jan-15-2026")
-        self.assertEqual(after_rollover["date"], "Jan-16-2026")
+        self.assertEqual(before_rollover["date"], "Jan 15, 2026")
+        self.assertEqual(after_rollover["date"], "Jan 16, 2026")
 
     def test_chicago_daylight_saving_transitions(self):
         spring_before = self.inspect_epoch(utc_epoch(2026, 3, 8, 7, 59))
