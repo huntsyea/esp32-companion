@@ -56,6 +56,11 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetTimeSynchronized(bool synchronized);
+    /// Reflect network-layer connectivity (Wi-Fi, wired, or cellular). Boards
+    /// that surface a connection indicator map this to their local radio label
+    /// (e.g. the Waveshare companion shows it as the "WIFI" indicator). It is
+    /// independent of the companion/Hermes session connection.
+    virtual void SetNetworkConnected(bool connected);
     virtual void SetConversationEvent(ConversationEvent event);
     virtual void SetTranscript(const char* transcript);
     virtual void SetPlaybackEnvelope(uint16_t level_milli);

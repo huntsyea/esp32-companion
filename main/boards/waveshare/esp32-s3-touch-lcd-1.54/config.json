@@ -7,7 +7,9 @@
             "name": "esp32-s3-touch-lcd-1.54",
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
-                "CONFIG_USE_DEVICE_AEC=y"
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_LANGUAGE_EN_US=y",
+                "CONFIG_LANGUAGE_ZH_CN=n"
             ]
         }
     ]

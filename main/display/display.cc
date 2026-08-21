@@ -30,6 +30,8 @@ void Display::UpdateStatusBar(bool update_all) {}
 
 void Display::SetTimeSynchronized(bool synchronized) {}
 
+void Display::SetNetworkConnected(bool connected) { (void)connected; }
+
 void Display::SetConversationEvent(ConversationEvent event) { (void)event; }
 
 void Display::SetTranscript(const char* transcript) { (void)transcript; }

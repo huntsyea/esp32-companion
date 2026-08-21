@@ -50,7 +50,14 @@ product_ui_t* product_ui_create(lv_obj_t* parent);
 /** Return the Product UI root object for screen management and snapshots. */
 lv_obj_t* product_ui_get_root(const product_ui_t* ui);
 
-/** Apply one semantic conversation event. Duplicate or invalid events are ignored. */
+/**
+ * Apply one semantic conversation event. Duplicate or invalid events are ignored.
+ *
+ * Returns true if the event changed any visible UI state (conversation state and/or
+ * the persistent connection indicators), false if nothing changed. Callers that only
+ * care about a conversation-state transition should compare product_ui_get_state()
+ * before/after instead of relying on the boolean alone.
+ */
 bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event);
 
 /** Return the current single source of truth for visible conversation state. */
@@ -58,6 +65,21 @@ product_ui_state_t product_ui_get_state(const product_ui_t* ui);
 
 /** Return a stable diagnostic name for a conversation state. */
 const char* product_ui_state_name(product_ui_state_t state);
+
+/**
+ * Update the persistent network indicator shown as the "WIFI" label.
+ *
+ * This tracks the network/radio link only; it is independent of the Hermes session
+ * connection (product_ui_is_hermes_connected). "wifi" here is the label used on the
+ * companion board and may also represent wired/cellular connectivity elsewhere.
+ */
+void product_ui_set_wifi_connected(product_ui_t* ui, bool connected);
+
+/** Return whether the UI currently reports Wi-Fi as connected. */
+bool product_ui_is_wifi_connected(const product_ui_t* ui);
+
+/** Return whether the UI currently reports Hermes as connected. */
+bool product_ui_is_hermes_connected(const product_ui_t* ui);
 
 /**
  * Set decoded playback level from 0 (silent) to 1000 (full scale).

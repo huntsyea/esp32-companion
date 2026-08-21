@@ -164,6 +164,29 @@ class ProductUiStateTests(unittest.TestCase):
                 states = self.trace_states(prefix + ["disconnected", "connected", "listen"])
                 self.assertEqual(states[-3:], ["offline", "idle", "listening"])
 
+    def test_wifi_and_hermes_connection_statuses_are_independent(self):
+        lines = self.run_simulator(
+            "--trace-events",
+            "wifi_connected,connected,disconnected,wifi_disconnected",
+        )
+        statuses = [
+            (
+                next(field for field in line.split() if field.startswith("wifi=")),
+                next(field for field in line.split() if field.startswith("hermes=")),
+            )
+            for line in lines
+        ]
+        self.assertEqual(
+            statuses,
+            [
+                ("wifi=disconnected", "hermes=disconnected"),
+                ("wifi=connected", "hermes=disconnected"),
+                ("wifi=connected", "hermes=connected"),
+                ("wifi=connected", "hermes=disconnected"),
+                ("wifi=disconnected", "hermes=disconnected"),
+            ],
+        )
+
     def test_speaking_envelope_is_smoothed_and_settles_on_silence(self):
         lines = self.run_simulator(
             "--trace-events",

@@ -219,7 +219,9 @@ static bool parse_event(const char* name, product_ui_event_t* event) {
 }
 
 static void print_trace_line(const char* action, const char* result, product_ui_t* ui) {
-    printf("action=%s result=%s state=%s envelope=%u\n", action, result,
+    printf("action=%s result=%s wifi=%s hermes=%s state=%s envelope=%u\n", action, result,
+           product_ui_is_wifi_connected(ui) ? "connected" : "disconnected",
+           product_ui_is_hermes_connected(ui) ? "connected" : "disconnected",
            product_ui_state_name(product_ui_get_state(ui)),
            (unsigned)product_ui_get_smoothed_envelope(ui));
 }
@@ -237,6 +239,12 @@ static int trace_events(product_ui_t* ui, const char* event_list) {
     for (char* token = strtok_r(events, ",", &save_pointer); token != NULL;
          token = strtok_r(NULL, ",", &save_pointer)) {
         uint32_t value = 0;
+        if (strcmp(token, "wifi_connected") == 0 ||
+            strcmp(token, "wifi_disconnected") == 0) {
+            product_ui_set_wifi_connected(ui, strcmp(token, "wifi_connected") == 0);
+            print_trace_line(token, "applied", ui);
+            continue;
+        }
         if (strncmp(token, "level=", 6) == 0) {
             if (!parse_unsigned(token + 6, 1000, &value)) {
                 fprintf(stderr, "Invalid playback level: %s\n", token + 6);
@@ -599,6 +607,13 @@ int main(int argc, char** argv) {
     }
 
     if (render_state) {
+        const char* preview_events = getenv("COMPANION_SIM_PREVIEW_EVENTS");
+        if (preview_events != NULL && preview_events[0] != '\0') {
+            const int preview_rc = trace_events(product_ui, preview_events);
+            if (preview_rc != 0) {
+                return preview_rc;
+            }
+        }
         if (!dispatch_state_path(product_ui, argv[2])) {
             fprintf(stderr, "Unknown Product UI state: %s\n", argv[2]);
             return 2;

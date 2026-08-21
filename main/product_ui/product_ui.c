@@ -15,6 +15,8 @@
 #define PRODUCT_UI_THINKING_COLOR 0x4E83AA
 #define PRODUCT_UI_OFFLINE_COLOR 0x74838A
 #define PRODUCT_UI_ERROR_COLOR 0xD94A4A
+#define PRODUCT_UI_CONNECTED_COLOR 0x248A5A
+#define PRODUCT_UI_DISCONNECTED_COLOR 0xA04747
 
 struct product_ui {
     lv_obj_t* root;
@@ -22,10 +24,14 @@ struct product_ui {
     lv_obj_t* eyes[2];
     lv_obj_t* side_marks[4];
     lv_obj_t* top_marks[3];
+    lv_obj_t* wifi_status_label;
+    lv_obj_t* hermes_status_label;
     lv_obj_t* transcript_label;
     lv_timer_t* animation_timer;
     product_ui_state_t state;
     product_ui_state_t recovery_state;
+    bool wifi_connected;
+    bool hermes_connected;
     uint32_t timer_epoch_ms;
     uint32_t animation_time_ms;
     uint16_t envelope_target;
@@ -34,6 +40,22 @@ struct product_ui {
 };
 
 static void render(product_ui_t* ui);
+
+static void render_connection_status(product_ui_t* ui) {
+    lv_label_set_text(ui->wifi_status_label, ui->wifi_connected ? "WIFI ON" : "WIFI OFF");
+    lv_obj_set_style_text_color(
+        ui->wifi_status_label,
+        lv_color_hex(ui->wifi_connected ? PRODUCT_UI_CONNECTED_COLOR
+                                        : PRODUCT_UI_DISCONNECTED_COLOR),
+        LV_PART_MAIN);
+    lv_label_set_text(ui->hermes_status_label,
+                      ui->hermes_connected ? "HERMES ON" : "HERMES OFF");
+    lv_obj_set_style_text_color(
+        ui->hermes_status_label,
+        lv_color_hex(ui->hermes_connected ? PRODUCT_UI_CONNECTED_COLOR
+                                          : PRODUCT_UI_DISCONNECTED_COLOR),
+        LV_PART_MAIN);
+}
 
 static lv_obj_t* create_eye(lv_obj_t* parent, int32_t x, int32_t y, int32_t width, int32_t height) {
     lv_obj_t* eye = product_ui_view_create_shape(
@@ -325,6 +347,17 @@ product_ui_t* product_ui_create(lv_obj_t* parent) {
         ui->top_marks[index] = product_ui_view_create_shape(
             ui->root, 0, 0, 1, 1, PRODUCT_IDENTITY_EYE_COLOR, LV_RADIUS_CIRCLE);
     }
+    ui->wifi_status_label = lv_label_create(ui->root);
+    lv_obj_set_pos(ui->wifi_status_label, 12, 14);
+    lv_obj_set_size(ui->wifi_status_label, 90, 18);
+    product_ui_view_make_event_transparent(ui->wifi_status_label);
+
+    ui->hermes_status_label = lv_label_create(ui->root);
+    lv_obj_set_pos(ui->hermes_status_label, 108, 14);
+    lv_obj_set_size(ui->hermes_status_label, 120, 18);
+    lv_obj_set_style_text_align(ui->hermes_status_label, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    product_ui_view_make_event_transparent(ui->hermes_status_label);
+
     ui->transcript_label = lv_label_create(ui->root);
     lv_obj_set_pos(ui->transcript_label, 15, 210);
     lv_obj_set_size(ui->transcript_label, 210, 22);
@@ -338,6 +371,7 @@ product_ui_t* product_ui_create(lv_obj_t* parent) {
     ui->state = PRODUCT_UI_STATE_OFFLINE;
     ui->recovery_state = PRODUCT_UI_STATE_OFFLINE;
     ui->timer_epoch_ms = lv_tick_get();
+    render_connection_status(ui);
     render(ui);
     lv_obj_add_event_cb(ui->root, on_root_deleted, LV_EVENT_DELETE, ui);
     ui->animation_timer = lv_timer_create(on_animation_timer, PRODUCT_UI_ANIMATION_PERIOD_MS, ui);
@@ -357,8 +391,12 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
     }
 
     product_ui_state_t next_state = ui->state;
+    bool connection_changed = false;
     switch (event) {
         case PRODUCT_UI_EVENT_CONNECTED:
+            connection_changed = !ui->hermes_connected;
+            ui->hermes_connected = true;
+            render_connection_status(ui);
             if (ui->state == PRODUCT_UI_STATE_OFFLINE) {
                 next_state = PRODUCT_UI_STATE_IDLE;
             }
@@ -396,6 +434,9 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
             }
             break;
         case PRODUCT_UI_EVENT_DISCONNECTED:
+            connection_changed = ui->hermes_connected;
+            ui->hermes_connected = false;
+            render_connection_status(ui);
             product_ui_set_transcript(ui, NULL);
             next_state = PRODUCT_UI_STATE_OFFLINE;
             break;
@@ -414,7 +455,9 @@ bool product_ui_dispatch(product_ui_t* ui, product_ui_event_t event) {
     }
 
     if (next_state == ui->state) {
-        return false;
+        // No conversation-state transition, but a connection indicator may still
+        // have changed (see product_ui_dispatch() return contract).
+        return connection_changed;
     }
     set_state(ui, next_state);
     return true;
@@ -440,6 +483,22 @@ const char* product_ui_state_name(product_ui_state_t state) {
             return "error";
     }
     return "offline";
+}
+
+void product_ui_set_wifi_connected(product_ui_t* ui, bool connected) {
+    if (ui == NULL || ui->wifi_connected == connected) {
+        return;
+    }
+    ui->wifi_connected = connected;
+    render_connection_status(ui);
+}
+
+bool product_ui_is_wifi_connected(const product_ui_t* ui) {
+    return ui != NULL && ui->wifi_connected;
+}
+
+bool product_ui_is_hermes_connected(const product_ui_t* ui) {
+    return ui != NULL && ui->hermes_connected;
 }
 
 void product_ui_set_playback_envelope(product_ui_t* ui, uint16_t level_milli) {

@@ -136,6 +136,15 @@ public:
         UpdateStatusBar(true);
     }
 
+    void SetNetworkConnected(bool connected) override {
+        {
+            std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
+            pending_network_connected_ = connected;
+            has_pending_network_state_ = true;
+        }
+        FlushPendingUiEvents();
+    }
+
     void SetConversationEvent(ConversationEvent event) override {
         product_ui_event_t product_event = PRODUCT_UI_EVENT_DISCONNECTED;
         switch (event) {
@@ -199,7 +208,8 @@ private:
 
     bool HasPendingUiEvents() {
         std::lock_guard<std::mutex> lock(pending_ui_events_mutex_);
-        return pending_conversation_event_count_ > 0 || has_pending_push_to_talk_state_;
+        return pending_conversation_event_count_ > 0 || has_pending_network_state_ ||
+               has_pending_push_to_talk_state_;
     }
 
     void QueueConversationEvent(product_ui_event_t event) {
@@ -234,6 +244,8 @@ private:
 
         std::array<product_ui_event_t, kPendingConversationEventCapacity> events{};
         size_t event_count = 0;
+        bool has_network_state = false;
+        bool network_connected = false;
         bool has_push_to_talk_state = false;
         bool push_to_talk_state = false;
         {
@@ -241,11 +253,17 @@ private:
             events = pending_conversation_events_;
             event_count = pending_conversation_event_count_;
             pending_conversation_event_count_ = 0;
+            has_network_state = has_pending_network_state_;
+            has_pending_network_state_ = false;
+            network_connected = pending_network_connected_;
             has_push_to_talk_state = has_pending_push_to_talk_state_;
             has_pending_push_to_talk_state_ = false;
             push_to_talk_state = pending_push_to_talk_state_;
         }
 
+        if (has_network_state) {
+            product_ui_set_wifi_connected(product_ui_, network_connected);
+        }
         for (size_t index = 0; index < event_count; ++index) {
             screen_manager_dispatch_event(screen_manager_, events[index]);
         }
@@ -320,6 +338,8 @@ private:
     std::array<product_ui_event_t, kPendingConversationEventCapacity>
         pending_conversation_events_{};
     size_t pending_conversation_event_count_ = 0;
+    bool has_pending_network_state_ = false;
+    bool pending_network_connected_ = false;
     bool has_pending_push_to_talk_state_ = false;
     bool pending_push_to_talk_state_ = false;
 };

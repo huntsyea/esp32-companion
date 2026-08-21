@@ -111,10 +111,12 @@ void Application::Initialize() {
 
         switch (event) {
             case NetworkEvent::Scanning:
+                display->SetNetworkConnected(false);
                 display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
             case NetworkEvent::Connecting: {
+                display->SetNetworkConnected(false);
                 if (data.empty()) {
                     // Cellular network - registering without carrier info yet
                     display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
@@ -128,6 +130,7 @@ void Application::Initialize() {
                 break;
             }
             case NetworkEvent::Connected: {
+                display->SetNetworkConnected(true);
                 std::string msg = Lang::Strings::CONNECTED_TO;
                 msg += data;
                 display->ShowNotification(msg.c_str(), 30000);
@@ -135,9 +138,11 @@ void Application::Initialize() {
                 break;
             }
             case NetworkEvent::Disconnected:
+                display->SetNetworkConnected(false);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
             case NetworkEvent::WifiConfigModeEnter:
+                display->SetNetworkConnected(false);
                 // WiFi config mode enter is handled by WifiBoard internally
                 break;
             case NetworkEvent::WifiConfigModeExit:
