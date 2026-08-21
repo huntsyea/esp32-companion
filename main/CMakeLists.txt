@@ -889,6 +889,7 @@ if(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54)
         "product_ui/companion_time.c"
         "product_ui/product_ui.c"
         "product_ui/screen_manager.c"
+        "product_ui/status_screen.c"
         "product_ui/view_helpers.c"
     )
     list(APPEND INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/product_ui")

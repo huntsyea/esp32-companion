@@ -4,6 +4,7 @@
 #include "view_helpers.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #define PRODUCT_UI_ANIMATION_PERIOD_MS 33
@@ -495,6 +496,13 @@ void product_ui_set_transcript(product_ui_t* ui, const char* transcript) {
 
 const char* product_ui_get_transcript(const product_ui_t* ui) {
     return ui == NULL ? "" : ui->transcript;
+}
+
+void product_ui_set_background_color(product_ui_t* ui, uint32_t color) {
+    if (ui == NULL || ui->root == NULL) {
+        return;
+    }
+    lv_obj_set_style_bg_color(ui->root, lv_color_hex(color), LV_PART_MAIN);
 }
 
 void product_ui_set_animation_time(product_ui_t* ui, uint32_t time_ms) {

@@ -33,6 +33,8 @@ void Display::SetTimeSynchronized(bool synchronized) {}
 void Display::SetConversationEvent(ConversationEvent event) { (void)event; }
 
 void Display::SetTranscript(const char* transcript) { (void)transcript; }
+void Display::ShowVolumeOverlay(int volume) { (void)volume; }
+void Display::ShowPushToTalkHint(bool show) { (void)show; }
 
 void Display::SetPlaybackEnvelope(uint16_t level_milli) { (void)level_milli; }
 

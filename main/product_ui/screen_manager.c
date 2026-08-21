@@ -9,6 +9,7 @@ struct screen_manager {
     product_ui_t* product_ui;
     lv_obj_t* avatar_root;
     lv_obj_t* clock_root;
+    lv_obj_t* status_root;
     lv_timer_t* timer;
     screen_manager_screen_t selected_screen;
     screen_manager_screen_t visible_screen;
@@ -33,6 +34,7 @@ static void present(screen_manager_t* manager, screen_manager_screen_t screen) {
     manager->visible_screen = screen;
     product_ui_view_set_visible(manager->avatar_root, screen == SCREEN_MANAGER_SCREEN_AVATAR);
     product_ui_view_set_visible(manager->clock_root, screen == SCREEN_MANAGER_SCREEN_CLOCK);
+    product_ui_view_set_visible(manager->status_root, screen == SCREEN_MANAGER_SCREEN_STATUS);
 }
 
 static void on_timer(lv_timer_t* timer) {
@@ -49,11 +51,15 @@ static void on_parent_deleted(lv_event_t* event) {
     lv_free(manager);
 }
 
-screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t* clock_screen) {
+screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t* clock_screen,
+                                        status_screen_t* status_screen) {
     lv_obj_t* avatar_root = product_ui_get_root(product_ui);
     lv_obj_t* clock_root = clock_screen_get_root(clock_screen);
-    if (avatar_root == NULL || clock_root == NULL || lv_obj_get_parent(avatar_root) == NULL ||
-        lv_obj_get_parent(avatar_root) != lv_obj_get_parent(clock_root)) {
+    lv_obj_t* status_root = status_screen_get_root(status_screen);
+    if (avatar_root == NULL || clock_root == NULL || status_root == NULL ||
+        lv_obj_get_parent(avatar_root) == NULL ||
+        lv_obj_get_parent(avatar_root) != lv_obj_get_parent(clock_root) ||
+        lv_obj_get_parent(avatar_root) != lv_obj_get_parent(status_root)) {
         return NULL;
     }
 
@@ -65,6 +71,7 @@ screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t
     manager->product_ui = product_ui;
     manager->avatar_root = avatar_root;
     manager->clock_root = clock_root;
+    manager->status_root = status_root;
     manager->selected_screen = SCREEN_MANAGER_SCREEN_AVATAR;
     manager->visible_screen = SCREEN_MANAGER_SCREEN_AVATAR;
     manager->conversation_state = product_ui_get_state(product_ui);
@@ -88,12 +95,18 @@ bool screen_manager_handle_swipe(screen_manager_t* manager, screen_manager_swipe
     }
 
     screen_manager_screen_t next_screen = manager->selected_screen;
-    if (swipe == SCREEN_MANAGER_SWIPE_LEFT &&
-        manager->selected_screen == SCREEN_MANAGER_SCREEN_AVATAR) {
-        next_screen = SCREEN_MANAGER_SCREEN_CLOCK;
-    } else if (swipe == SCREEN_MANAGER_SWIPE_RIGHT &&
-               manager->selected_screen == SCREEN_MANAGER_SCREEN_CLOCK) {
-        next_screen = SCREEN_MANAGER_SCREEN_AVATAR;
+    if (swipe == SCREEN_MANAGER_SWIPE_LEFT) {
+        if (manager->selected_screen == SCREEN_MANAGER_SCREEN_AVATAR) {
+            next_screen = SCREEN_MANAGER_SCREEN_CLOCK;
+        } else if (manager->selected_screen == SCREEN_MANAGER_SCREEN_CLOCK) {
+            next_screen = SCREEN_MANAGER_SCREEN_STATUS;
+        }
+    } else if (swipe == SCREEN_MANAGER_SWIPE_RIGHT) {
+        if (manager->selected_screen == SCREEN_MANAGER_SCREEN_STATUS) {
+            next_screen = SCREEN_MANAGER_SCREEN_CLOCK;
+        } else if (manager->selected_screen == SCREEN_MANAGER_SCREEN_CLOCK) {
+            next_screen = SCREEN_MANAGER_SCREEN_AVATAR;
+        }
     }
 
     if (next_screen == manager->selected_screen) {
@@ -174,5 +187,12 @@ bool screen_manager_is_push_to_talk_active(const screen_manager_t* manager) {
 }
 
 const char* screen_manager_screen_name(screen_manager_screen_t screen) {
-    return screen == SCREEN_MANAGER_SCREEN_CLOCK ? "clock" : "avatar";
+    switch (screen) {
+        case SCREEN_MANAGER_SCREEN_CLOCK:
+            return "clock";
+        case SCREEN_MANAGER_SCREEN_STATUS:
+            return "status";
+        default:
+            return "avatar";
+    }
 }

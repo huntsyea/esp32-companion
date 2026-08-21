@@ -7,7 +7,12 @@
             "name": "esp32-s3-touch-lcd-1.54",
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
-                "CONFIG_USE_DEVICE_AEC=y"
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_LV_FONT_MONTSERRAT_12=y",
+                "CONFIG_LV_FONT_MONTSERRAT_16=y",
+                "CONFIG_LV_FONT_MONTSERRAT_28=y",
+                "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=n",
+                "CONFIG_SR_WN_WN9_JARVIS_TTS=y"
             ]
         }
     ]

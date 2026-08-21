@@ -3,6 +3,7 @@
 
 #include "clock_screen.h"
 #include "product_ui.h"
+#include "status_screen.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,6 +19,7 @@ typedef struct screen_manager screen_manager_t;
 typedef enum {
     SCREEN_MANAGER_SCREEN_AVATAR,
     SCREEN_MANAGER_SCREEN_CLOCK,
+    SCREEN_MANAGER_SCREEN_STATUS,
 } screen_manager_screen_t;
 
 typedef enum {
@@ -26,12 +28,14 @@ typedef enum {
 } screen_manager_swipe_t;
 
 /**
- * Create the sole owner of Avatar and Clock Screen visibility and selection.
+ * Create the sole owner of Avatar, Clock, and Status Screen visibility and
+ * selection.
  *
- * Both screens must already exist under the same LVGL parent. The initial
+ * All screens must already exist under the same LVGL parent. The initial
  * remembered and visible screen is the Avatar Screen.
  */
-screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t* clock_screen);
+screen_manager_t* screen_manager_create(product_ui_t* product_ui, clock_screen_t* clock_screen,
+                                        status_screen_t* status_screen);
 
 /**
  * Apply a non-wrapping horizontal swipe.
