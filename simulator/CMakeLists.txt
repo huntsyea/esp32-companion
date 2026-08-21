@@ -36,6 +36,7 @@ add_executable(companion-simulator
     "../main/product_ui/companion_time.c"
     "../main/product_ui/product_ui.c"
     "../main/product_ui/screen_manager.c"
+    "../main/product_ui/status_screen.c"
     "../main/product_ui/view_helpers.c"
 )
 

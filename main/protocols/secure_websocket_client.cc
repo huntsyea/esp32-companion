@@ -199,6 +199,21 @@ void SecureWebSocketClient::HandleEvent(int32_t event_id, const esp_websocket_ev
         return;
     }
 
+    // The ESP WebSocket client surfaces control frames (PING/PONG/CLOSE) as
+    // DATA events because propagate_control_frames is enabled. They are already
+    // answered inside the transport (auto-PONG), so never feed them to the
+    // JSON/audio parser: a PING payload is not valid JSON and a 0-length PONG
+    // would otherwise be rejected as a malformed frame or corrupt an in-flight
+    // fragmented message.
+    switch (event->op_code) {
+        case 0x0:  // continuation (of a TEXT/BINARY message)
+        case 0x1:  // text frame
+        case 0x2:  // binary frame
+            break;
+        default:  // control frames: 0x8 CLOSE, 0x9 PING, 0xA PONG
+            return;
+    }
+
     const size_t data_length = static_cast<size_t>(event->data_len);
     const size_t payload_offset = static_cast<size_t>(event->payload_offset);
     const size_t payload_length = static_cast<size_t>(event->payload_len);

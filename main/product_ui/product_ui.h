@@ -99,6 +99,14 @@ void product_ui_set_transcript(product_ui_t* ui, const char* transcript);
 const char* product_ui_get_transcript(const product_ui_t* ui);
 
 /**
+ * Set the Avatar Screen background color.
+ *
+ * The caller computes the color from local time (e.g. black at night, white
+ * during the day).
+ */
+void product_ui_set_background_color(product_ui_t* ui, uint32_t color);
+
+/**
  * Render a deterministic animation time in milliseconds.
  *
  * Production uses the internal LVGL timer. The simulator and tests can inject

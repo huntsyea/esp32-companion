@@ -8,7 +8,9 @@
 #include "mcp_server.h"
 #include "product_ui.h"
 #include "screen_manager.h"
+#include "status_screen.h"
 #include "system_reset.h"
+#include "view_helpers.h"
 #include "wifi_board.h"
 
 #include <driver/i2c_master.h>
@@ -25,6 +27,8 @@
 #include <atomic>
 #include <mutex>
 
+#include <esp_sntp.h>
+
 #include "assets/lang_config.h"
 #include "power_save_timer.h"
 #include "settings.h"
@@ -38,8 +42,12 @@
 #include "esp_ota_ops.h"
 #include "power_manager.h"
 
+LV_FONT_DECLARE(lv_font_montserrat_16);
+LV_FONT_DECLARE(lv_font_montserrat_28);
+
 #define TAG "waveshare_esp32_s3_touch_lcd_1_54"
-#define PUSH_TO_TALK_HOLD_MS 250
+#define PUSH_TO_TALK_HOLD_MS 200
+#define VOLUME_OVERLAY_DISMISS_MS 2
 
 class CustomButton : public Button {
 public:
@@ -89,8 +97,12 @@ public:
         if (clock_screen_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create Clock Screen");
         }
-        if (product_ui_ != nullptr && clock_screen_ != nullptr) {
-            screen_manager_ = screen_manager_create(product_ui_, clock_screen_);
+        status_screen_ = status_screen_create(lv_screen_active());
+        if (status_screen_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create Status Screen");
+        }
+        if (product_ui_ != nullptr && clock_screen_ != nullptr && status_screen_ != nullptr) {
+            screen_manager_ = screen_manager_create(product_ui_, clock_screen_, status_screen_);
             if (screen_manager_ == nullptr) {
                 ESP_LOGE(TAG, "Failed to create Screen Manager");
             } else {
@@ -98,6 +110,73 @@ public:
                 FlushPendingUiEventsLocked();
             }
         }
+        CreateVolumeOverlay();
+        CreatePushToTalkHint();
+    }
+
+    void CreatePushToTalkHint() {
+        push_to_talk_hint_ = lv_label_create(lv_screen_active());
+        lv_obj_set_size(push_to_talk_hint_, LV_PCT(100), 20);
+        lv_obj_align(push_to_talk_hint_, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_label_set_long_mode(push_to_talk_hint_, LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_set_style_text_align(push_to_talk_hint_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(push_to_talk_hint_, lv_color_hex(0x95E1FF), LV_PART_MAIN);
+        lv_obj_set_style_text_font(push_to_talk_hint_, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_label_set_text(push_to_talk_hint_, "HOLD TO TALK");
+        product_ui_view_make_event_transparent(push_to_talk_hint_);
+        product_ui_view_set_visible(push_to_talk_hint_, false);
+    }
+
+    void CreateVolumeOverlay() {
+        volume_overlay_ = lv_obj_create(lv_screen_active());
+        lv_obj_set_size(volume_overlay_, LV_PCT(100), LV_PCT(100));
+        lv_obj_align(volume_overlay_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_bg_color(volume_overlay_, lv_color_hex(0x061116), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(volume_overlay_, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(volume_overlay_, 0, LV_PART_MAIN);
+        lv_obj_set_style_border_width(volume_overlay_, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(volume_overlay_, 0, LV_PART_MAIN);
+        lv_obj_clear_flag(volume_overlay_, LV_OBJ_FLAG_SCROLLABLE);
+        product_ui_view_make_event_transparent(volume_overlay_);
+
+        lv_obj_t* title = lv_label_create(volume_overlay_);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(title, lv_color_hex(0x95E1FF), LV_PART_MAIN);
+        lv_obj_set_style_text_font(title, &lv_font_montserrat_16, LV_PART_MAIN);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 40);
+        lv_label_set_text(title, "VOLUME");
+
+        volume_label_ = lv_label_create(volume_overlay_);
+        lv_obj_set_style_text_align(volume_label_, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_color(volume_label_, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_text_font(volume_label_, &lv_font_montserrat_28, LV_PART_MAIN);
+        lv_obj_align(volume_label_, LV_ALIGN_CENTER, 0, -20);
+        lv_label_set_text(volume_label_, "50%");
+
+        volume_bar_ = lv_bar_create(volume_overlay_);
+        lv_obj_set_size(volume_bar_, 180, 16);
+        lv_obj_align(volume_bar_, LV_ALIGN_CENTER, 0, 40);
+        lv_bar_set_range(volume_bar_, 0, 100);
+        lv_bar_set_value(volume_bar_, 50, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(volume_bar_, lv_color_hex(0x95E1FF), LV_PART_INDICATOR);
+
+        product_ui_view_set_visible(volume_overlay_, false);
+
+        const esp_timer_create_args_t timer_args = {
+            .callback =
+                [](void* context) {
+                    auto* display = static_cast<CompanionDisplay*>(context);
+                    if (display->Lock(1)) {
+                        product_ui_view_set_visible(display->volume_overlay_, false);
+                        display->Unlock();
+                    }
+                },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "volume_overlay",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &volume_overlay_timer_));
     }
 
     void UpdateStatusBar(bool update_all = false) override {
@@ -127,8 +206,22 @@ public:
             last_clock_synchronized_ = time_synchronized_;
             has_clock_snapshot_ = true;
         }
+        UpdateAvatarBackground(local_time);
         FlushPendingUiEventsLocked();
         Unlock();
+    }
+
+    // Black background from 6pm (18:00) to 8am (08:00), white otherwise.
+    void UpdateAvatarBackground(const companion_local_time_t& local_time) {
+        if (product_ui_ == nullptr) {
+            return;
+        }
+        const bool night = local_time.hour >= 18 || local_time.hour < 8;
+        const uint32_t color = night ? 0x000000 : 0xFFFFFF;
+        if (color != avatar_background_color_) {
+            avatar_background_color_ = color;
+            product_ui_set_background_color(product_ui_, color);
+        }
     }
 
     void SetTimeSynchronized(bool synchronized) override {
@@ -150,9 +243,11 @@ public:
         switch (event) {
             case ConversationEvent::kConnected:
                 product_event = PRODUCT_UI_EVENT_CONNECTED;
+                SetHermesConnected(true);
                 break;
             case ConversationEvent::kDisconnected:
                 product_event = PRODUCT_UI_EVENT_DISCONNECTED;
+                SetHermesConnected(false);
                 break;
             case ConversationEvent::kListenStarted:
                 product_event = PRODUCT_UI_EVENT_LISTEN_STARTED;
@@ -201,6 +296,52 @@ public:
     void SetPushToTalkActive(bool active) override {
         QueuePushToTalkEvent(active);
         FlushPendingUiEvents();
+    }
+
+    void ShowPushToTalkHint(bool show) {
+        if (push_to_talk_hint_ == nullptr || !Lock(1)) {
+            return;
+        }
+        product_ui_view_set_visible(push_to_talk_hint_, show);
+        Unlock();
+    }
+
+    void SetConnectionStatus(bool wifi_connected, bool hermes_connected) {
+        if (status_screen_ == nullptr || !Lock(1)) {
+            return;
+        }
+        status_screen_set_connection_status(status_screen_, wifi_connected, hermes_connected);
+        Unlock();
+    }
+
+    void SetWifiConnected(bool connected) {
+        wifi_connected_ = connected;
+        SetConnectionStatus(wifi_connected_, hermes_connected_);
+    }
+
+    void SetHermesConnected(bool connected) {
+        hermes_connected_ = connected;
+        SetConnectionStatus(wifi_connected_, hermes_connected_);
+    }
+
+    void ShowVolumeOverlay(int volume) {
+        if (volume_overlay_ == nullptr || !Lock(1)) {
+            return;
+        }
+        if (volume < 0) {
+            volume = 0;
+        }
+        if (volume > 100) {
+            volume = 100;
+        }
+        lv_bar_set_value(volume_bar_, volume, LV_ANIM_OFF);
+        lv_label_set_text_fmt(volume_label_, "%d%%", volume);
+        product_ui_view_set_visible(volume_overlay_, true);
+        if (volume_overlay_timer_ != nullptr) {
+            esp_timer_stop(volume_overlay_timer_);
+            esp_timer_start_once(volume_overlay_timer_, VOLUME_OVERLAY_DISMISS_MS * 1000U);
+        }
+        Unlock();
     }
 
 private:
@@ -329,8 +470,17 @@ private:
 
     product_ui_t* product_ui_ = nullptr;
     clock_screen_t* clock_screen_ = nullptr;
+    status_screen_t* status_screen_ = nullptr;
     screen_manager_t* screen_manager_ = nullptr;
+    lv_obj_t* volume_overlay_ = nullptr;
+    lv_obj_t* volume_bar_ = nullptr;
+    lv_obj_t* volume_label_ = nullptr;
+    esp_timer_handle_t volume_overlay_timer_ = nullptr;
+    lv_obj_t* push_to_talk_hint_ = nullptr;
     bool time_synchronized_ = false;
+    bool wifi_connected_ = false;
+    bool hermes_connected_ = false;
+    uint32_t avatar_background_color_ = 0xEDF5F9;
     int64_t last_clock_minute_ = 0;
     bool last_clock_synchronized_ = false;
     bool has_clock_snapshot_ = false;
@@ -354,6 +504,7 @@ private:
     PowerManager* power_manager_ = nullptr;
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t push_to_talk_timer_ = nullptr;
+    std::atomic<bool> sntp_initialized_{false};
     std::atomic<bool> push_to_talk_pressed_{false};
     std::atomic<bool> push_to_talk_active_{false};
     std::atomic<bool> push_to_talk_consumed_click_{false};
@@ -399,6 +550,7 @@ private:
 
     void ReleasePushToTalk() {
         push_to_talk_pressed_.store(false);
+        GetDisplay()->ShowPushToTalkHint(false);
         if (push_to_talk_timer_ != nullptr && esp_timer_is_active(push_to_talk_timer_)) {
             esp_timer_stop(push_to_talk_timer_);
         }
@@ -410,6 +562,42 @@ private:
     void InitializePowerManager() {
         power_manager_ = new PowerManager(BATTERY_CHARGING_PIN, BATTERY_ADC_PIN, BATTERY_EN_PIN);
         power_manager_->PowerON();
+    }
+
+    // Start SNTP so the clock can sync even when the OTA endpoint returns no
+    // server_time. The Companion clock keeps the system epoch in UTC and applies
+    // its configured POSIX time zone only while formatting local time.
+    void InitializeSntp() {
+        if (sntp_initialized_) {
+            return;
+        }
+        sntp_initialized_ = true;
+        esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+        esp_sntp_setservername(0, "pool.ntp.org");
+        esp_sntp_setservername(1, "time.apple.com");
+        esp_sntp_set_time_sync_notification_cb([](struct timeval* tv) {
+            auto display = Board::GetInstance().GetDisplay();
+            if (display != nullptr) {
+                display->SetTimeSynchronized(true);
+            }
+        });
+        esp_sntp_init();
+    }
+
+    void OnNetworkEvent(NetworkEvent event, const std::string& data = "") override {
+        WifiBoard::OnNetworkEvent(event, data);
+        auto* display = static_cast<CompanionDisplay*>(GetDisplay());
+        switch (event) {
+            case NetworkEvent::Connected:
+                InitializeSntp();
+                display->SetWifiConnected(true);
+                break;
+            case NetworkEvent::Disconnected:
+                display->SetWifiConnected(false);
+                break;
+            default:
+                break;
+        }
     }
 
     void InitializePowerSaveTimer() {
@@ -542,6 +730,7 @@ private:
             pwr_button_.OnPressUpDel();
             pwr_button_.OnPressDown([this]() {
                 push_to_talk_pressed_.store(true);
+                GetDisplay()->ShowPushToTalkHint(true);
                 if (push_to_talk_timer_ != nullptr && !esp_timer_is_active(push_to_talk_timer_)) {
                     esp_timer_start_once(push_to_talk_timer_, PUSH_TO_TALK_HOLD_MS * 1000U);
                 }
@@ -597,12 +786,12 @@ private:
                 volume = 100;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume / 10));
+            GetDisplay()->ShowVolumeOverlay(volume);
         });
 
         volume_up_button_.OnLongPress([this]() {
             Board::GetInstance().GetAudioCodec()->SetOutputVolume(100);
-            GetDisplay()->ShowNotification(Lang::Strings::MAX_VOLUME);
+            GetDisplay()->ShowVolumeOverlay(100);
         });
 
         volume_down_button_.OnClick([this]() {
@@ -612,12 +801,12 @@ private:
                 volume = 0;
             }
             codec->SetOutputVolume(volume);
-            GetDisplay()->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume / 10));
+            GetDisplay()->ShowVolumeOverlay(volume);
         });
 
         volume_down_button_.OnLongPress([this]() {
             Board::GetInstance().GetAudioCodec()->SetOutputVolume(0);
-            GetDisplay()->ShowNotification(Lang::Strings::MUTED);
+            GetDisplay()->ShowVolumeOverlay(0);
         });
 
 #if CONFIG_USE_DEVICE_AEC

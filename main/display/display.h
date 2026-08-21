@@ -63,6 +63,8 @@ public:
     virtual void SetNetworkConnected(bool connected);
     virtual void SetConversationEvent(ConversationEvent event);
     virtual void SetTranscript(const char* transcript);
+    virtual void ShowVolumeOverlay(int volume);
+    virtual void ShowPushToTalkHint(bool show);
     virtual void SetPlaybackEnvelope(uint16_t level_milli);
     virtual void SetPushToTalkActive(bool active);
     virtual void SetPowerSaveMode(bool on);

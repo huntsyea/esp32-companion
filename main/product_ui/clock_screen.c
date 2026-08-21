@@ -125,7 +125,7 @@ bool clock_screen_format(const companion_local_time_t* local_time, clock_screen_
     snprintf(model->time, sizeof(model->time), "%u:%02u", hour_12, local_time->minute);
     snprintf(model->period, sizeof(model->period), "%s", local_time->hour < 12 ? "AM" : "PM");
     snprintf(model->weekday, sizeof(model->weekday), "%s", WEEKDAYS[local_time->weekday]);
-    snprintf(model->date, sizeof(model->date), "%s-%u-%d", MONTHS[local_time->month - 1],
+    snprintf(model->date, sizeof(model->date), "%s %u, %d", MONTHS[local_time->month - 1],
              local_time->day, local_time->year);
     model->is_dst = local_time->is_dst;
     return true;
@@ -165,8 +165,6 @@ clock_screen_t* clock_screen_create(lv_obj_t* parent) {
                                  LV_RADIUS_CIRCLE);
     screen->period_label = create_label(screen->synchronized_group, 166, CLOCK_PRIMARY_COLOR);
 
-    lv_obj_t* zone_label = create_label(screen->synchronized_group, 204, CLOCK_MUTED_COLOR);
-    lv_label_set_text(zone_label, "LOCAL TIME");
     lv_obj_t* unsynchronized_title =
         create_label(screen->unsynchronized_group, 91, CLOCK_ERROR_COLOR);
     lv_label_set_text(unsynchronized_title, "TIME NOT SYNCED");

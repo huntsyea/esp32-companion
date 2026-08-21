@@ -2,6 +2,7 @@
 #include "companion_time.h"
 #include "product_ui.h"
 #include "screen_manager.h"
+#include "status_screen.h"
 
 #include "lvgl.h"
 
@@ -27,6 +28,7 @@ static void print_usage(const char* program) {
             "Usage: %s [--smoke-test | --render-reference PATH | "
             "--render-state STATE TIME_MS ENVELOPE PATH | --trace-events EVENTS | "
             "--render-clock EPOCH PATH | --render-clock-unsynchronized PATH | "
+            "--render-status PATH | "
             "--inspect-clock EPOCH | --inspect-clock-unsynchronized | "
             "--trace-clock-updates FIRST SAME_MINUTE NEXT_MINUTE | "
             "--inspect-clock-zone ZONE EPOCH | --trace-navigation ACTIONS | "
@@ -467,6 +469,7 @@ int main(int argc, char** argv) {
     const bool render_state = argc == 6 && strcmp(argv[1], "--render-state") == 0;
     const bool event_trace = argc == 3 && strcmp(argv[1], "--trace-events") == 0;
     const bool render_clock = argc == 4 && strcmp(argv[1], "--render-clock") == 0;
+    const bool render_status = argc == 3 && strcmp(argv[1], "--render-status") == 0;
     const bool render_clock_unsynchronized =
         argc == 3 && strcmp(argv[1], "--render-clock-unsynchronized") == 0;
     const bool inspect_clock_epoch = argc == 3 && strcmp(argv[1], "--inspect-clock") == 0;
@@ -478,7 +481,7 @@ int main(int argc, char** argv) {
     const bool transcript_inspection = argc == 3 && strcmp(argv[1], "--inspect-transcript") == 0;
     const bool interactive = argc == 1;
     if (!interactive && !smoke_test && !legacy_reference && !render_state && !event_trace &&
-        !render_clock && !render_clock_unsynchronized && !inspect_clock_epoch &&
+        !render_clock && !render_status && !render_clock_unsynchronized && !inspect_clock_epoch &&
         !inspect_clock_unsynchronized && !trace_clock && !inspect_clock_zone && !navigation_trace &&
         !transcript_inspection) {
         print_usage(argv[0]);
@@ -560,9 +563,22 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    screen_manager_t* screen_manager = screen_manager_create(product_ui, clock_screen);
-    if (screen_manager == NULL || screen_manager_create(NULL, clock_screen) != NULL ||
-        screen_manager_create(product_ui, NULL) != NULL) {
+    status_screen_t* status_screen = status_screen_create(lv_screen_active());
+    if (status_screen == NULL || status_screen_get_root(status_screen) == NULL) {
+        fputs("Failed to create the Status Screen.\n", stderr);
+        return 1;
+    }
+    if (status_screen_create(NULL) != NULL ||
+        !is_interaction_transparent(status_screen_get_root(status_screen))) {
+        fputs("Status Screen accepted invalid input or blocks pointer input.\n", stderr);
+        return 1;
+    }
+
+    screen_manager_t* screen_manager =
+        screen_manager_create(product_ui, clock_screen, status_screen);
+    if (screen_manager == NULL || screen_manager_create(NULL, clock_screen, status_screen) != NULL ||
+        screen_manager_create(product_ui, NULL, status_screen) != NULL ||
+        screen_manager_create(product_ui, clock_screen, NULL) != NULL) {
         fputs("Failed to create the Screen Manager or invalid input was accepted.\n", stderr);
         return 1;
     }
@@ -632,6 +648,13 @@ int main(int argc, char** argv) {
         }
         return write_reference_image(clock_screen_get_root(clock_screen),
                                      render_clock ? argv[3] : argv[2]);
+    }
+
+    if (render_status) {
+        status_screen_set_connection_status(status_screen, true, true);
+        screen_manager_handle_swipe(screen_manager, SCREEN_MANAGER_SWIPE_LEFT);
+        screen_manager_handle_swipe(screen_manager, SCREEN_MANAGER_SWIPE_LEFT);
+        return write_reference_image(status_screen_get_root(status_screen), argv[2]);
     }
 
     if (smoke_test) {
