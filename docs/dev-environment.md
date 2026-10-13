@@ -87,8 +87,7 @@ with the runtime's venv Python, restarts `ai.hermes.gateway` via launchd, and
 waits for `✓ xiaozhi_companion connected` in the gateway log. One-time setup it
 depends on is recorded in the script header. `--no-restart` defers the reload.
 
-The mini is reachable as `mac-mini` (`~/.ssh/config` → `mac-mini.local`;
-the old hardcoded LAN IP went stale).
+The mini is reachable as `mac-mini`, an SSH host alias in `~/.ssh/config`.
 
 ## Device authorization (one-time per device)
 
